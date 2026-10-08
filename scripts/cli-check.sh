@@ -112,7 +112,7 @@ run_case unknown-option-registry 1 empty "unknown option '--jsn' (did you mean '
 run_case legacy-ref 1 empty "'orders@3': use 'orders:3' to pin a version ('@NAME' selects a registry)" get orders@3
 run_case legacy-ref-json 1 empty "'orders@3': use 'orders:3' to pin a version ('@NAME' selects a registry)" get --errors=json orders@3
 run_case invalid-version 1 empty "version must be 'latest' or a positive integer" get orders:abc
-run_case rm-latest-version 1 empty "version must be 'latest' or a positive integer" rm orders:latest -y
+run_case rm-latest-version 1 empty "version must be a positive integer" rm orders:latest -y
 run_case legacy-ref-write 1 empty "'orders@3': use 'orders:3' to pin a version ('@NAME' selects a registry)" write orders@3
 run_case invalid-version-write 1 empty "version must be 'latest' or a positive integer" write orders:abc
 run_case missing-topic 1 empty "missing REF" get
