@@ -110,10 +110,10 @@ for mode in file target env flag; do
     set -e
     [ "$status" -eq 1 ] || { echo "FAIL config-$mode: exit $status"; exit 1; }
     case "$mode" in
-        file) expected="schema.registry.url from registry"; endpoint="http://127.0.0.1:2/subjects" ;;
-        target) expected="schema.registry.url from registry"; endpoint="http://127.0.0.1:3/subjects" ;;
-        env) expected="schema.registry.url from environment"; endpoint="http://127.0.0.1:4/subjects" ;;
-        flag) expected="schema.registry.url from flag"; endpoint="http://127.0.0.1:5/subjects" ;;
+        file) expected="config from ./wing.yaml"; endpoint="http://127.0.0.1:2/subjects" ;;
+        target) expected="registry 'dev' (from @dev)"; endpoint="http://127.0.0.1:3/subjects" ;;
+        env) expected="registry URL http://127.0.0.1:4 (from SCHEMA_REGISTRY_URL)"; endpoint="http://127.0.0.1:4/subjects" ;;
+        flag) expected="registry URL http://127.0.0.1:5 (from --registry)"; endpoint="http://127.0.0.1:5/subjects" ;;
     esac
     grep -Fq "$expected" "$TMP/$mode.err" || {
         echo "FAIL config-$mode: missing '$expected'"

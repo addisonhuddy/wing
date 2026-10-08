@@ -7,6 +7,7 @@ pub const Registry = struct {
     alloc: std.mem.Allocator,
     client: http.Client,
     last_error: ?[]const u8 = null,
+    last_status: u16 = 0,
 
     pub fn init(
         io: std.Io,
@@ -51,10 +52,22 @@ pub const Registry = struct {
 
     fn request(self: *Registry, method: std.http.Method, path: []const u8, payload: ?[]const u8) ![]const u8 {
         const response = self.client.request(method, path, payload) catch |err| {
-            self.last_error = try std.fmt.allocPrint(self.alloc, "Schema Registry request failed: {s}", .{@errorName(err)});
+            self.last_status = 0;
+            self.last_error = try std.fmt.allocPrint(self.alloc, "cannot reach Schema Registry at {s}: {s}", .{
+                self.client.last_url orelse "configured URL",
+                try errorText(self.alloc, @errorName(err)),
+            });
             return err;
         };
+        self.last_status = response.status;
         if (response.status >= 200 and response.status < 300) return response.body;
+        if (response.status == 401 or response.status == 403) {
+            self.last_error = try std.fmt.allocPrint(self.alloc, "Schema Registry at {s} rejected the credentials ({d}); check basic.auth.user.info", .{
+                self.client.last_url orelse "configured URL",
+                response.status,
+            });
+            return error.RegistryFailure;
+        }
         const parsed = std.json.parseFromSliceLeaky(std.json.Value, self.alloc, response.body, .{ .allocate = .alloc_always, .parse_numbers = false }) catch null;
         if (parsed) |v| {
             const code = objectValue(v, "error_code");
@@ -136,6 +149,21 @@ pub const Registry = struct {
         return stringValue(objectValue(value, "compatibilityLevel") orelse .null) orelse "BACKWARD";
     }
 };
+
+fn errorText(alloc: std.mem.Allocator, name: []const u8) ![]const u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    for (name, 0..) |char, index| {
+        if (std.ascii.isUpper(char) and index > 0) try out.append(alloc, ' ');
+        try out.append(alloc, std.ascii.toLower(char));
+    }
+    return out.toOwnedSlice(alloc);
+}
+
+test "connection error names are human readable" {
+    const actual = try errorText(std.testing.allocator, "ConnectionRefused");
+    defer std.testing.allocator.free(actual);
+    try std.testing.expectEqualStrings("connection refused", actual);
+}
 
 fn guidSchemaId(alloc: std.mem.Allocator, value: std.json.Value) !?[]const u8 {
     if (value != .object) return null;

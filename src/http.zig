@@ -16,11 +16,13 @@ pub const Client = struct {
     debug: bool,
     ca_bundle: ?[]const u8 = null,
     insecure: bool = false,
+    last_url: ?[]const u8 = null,
 
     pub fn request(self: *Client, method: std.http.Method, path: []const u8, payload: ?[]const u8) !Response {
         var last_err: anyerror = error.ConnectionFailed;
         for (self.bases) |base| {
             const url = try std.fmt.allocPrint(self.alloc, "{s}{s}", .{ std.mem.trimEnd(u8, base, "/"), path });
+            self.last_url = url;
             var client: std.http.Client = .{ .allocator = self.alloc, .io = self.io };
             defer client.deinit();
             try client.initDefaultProxies(self.alloc, self.env);

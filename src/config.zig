@@ -11,6 +11,8 @@ pub const Settings = struct {
     schema_dir: ?[]const u8 = null,
     target: ?[]const u8 = null,
     file: ?[]const u8 = null,
+    registry_origin: ?[]const u8 = null,
+    url_origin: ?[]const u8 = null,
     origins: std.StringHashMapUnmanaged([]const u8) = .empty,
 };
 
@@ -223,6 +225,25 @@ pub fn load(
         target = doc.default_name;
     }
     s.target = target;
+    if (global.target) |name| {
+        s.registry_origin = try std.fmt.allocPrint(alloc, "from @{s}", .{name});
+    } else if (envValue(env, "WING_TARGET") != null) {
+        s.registry_origin = "from WING_TARGET";
+    } else if (current != null) {
+        const path = try currentPath(alloc, env);
+        const display_path = if (envValue(env, "XDG_CONFIG_HOME") == null and envValue(env, "HOME") != null) blk: {
+            const home = envValue(env, "HOME").?;
+            if (std.mem.startsWith(u8, path, home))
+                break :blk try std.fmt.allocPrint(alloc, "~{s}", .{path[home.len..]});
+            break :blk path;
+        } else path;
+        s.registry_origin = try std.fmt.allocPrint(alloc, "current registry, from {s}", .{display_path});
+    } else if (doc.default_name) |name| {
+        s.registry_origin = if (s.file) |file|
+            try std.fmt.allocPrint(alloc, "default '{s}' in {s}", .{ name, file })
+        else
+            try std.fmt.allocPrint(alloc, "default '{s}'", .{name});
+    }
     var selected = Props.empty;
     var named = false;
     if (target) |name| {
@@ -267,6 +288,21 @@ pub fn load(
             else
                 "file";
             putOrigin(&s, alloc, key, origin);
+            if (std.mem.eql(u8, key, "schema.registry.url")) {
+                s.url_origin = if (std.mem.eql(u8, origin, "flag"))
+                    "from --registry"
+                else if (std.mem.eql(u8, origin, "environment"))
+                    "from SCHEMA_REGISTRY_URL"
+                else if (std.mem.eql(u8, origin, "registry"))
+                    if (s.target) |name|
+                        try std.fmt.allocPrint(alloc, "from registry '{s}' in {s}", .{ name, s.file orelse "config" })
+                    else
+                        try std.fmt.allocPrint(alloc, "from {s}", .{s.file orelse "config"})
+                else if (std.mem.eql(u8, origin, "defaults"))
+                    try std.fmt.allocPrint(alloc, "from defaults in {s}", .{s.file orelse "config"})
+                else
+                    try std.fmt.allocPrint(alloc, "from {s}", .{s.file orelse "config"});
+            }
         }
     }
     s.urls = values[0] orelse "";
@@ -432,15 +468,15 @@ pub fn currentFilePath(alloc: std.mem.Allocator, env: *std.process.Environ.Map) 
 }
 
 test "registry properties parse key value config" {
-    const props = try parseProperties(std.testing.allocator, "schema.registry.url=http://localhost:8081\n#x\n");
-    defer {
-        var it = props.iterator();
-        while (it.next()) |entry| std.testing.allocator.free(entry.key_ptr.*);
-    }
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const props = try parseProperties(arena.allocator(), "schema.registry.url=http://localhost:8081\n#x\n");
     try std.testing.expectEqualStrings("http://localhost:8081", props.get("schema.registry.url").?);
 }
 
 test "registry splice preserves following entries" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
     const original =
         \\registries:
         \\  local:
@@ -448,7 +484,7 @@ test "registry splice preserves following entries" {
         \\  prod:
         \\    schema.registry.url: http://prod
     ;
-    const updated = try spliceRegistry(std.testing.allocator, original, "local", "  local:\n    schema.registry.url: http://new\n");
+    const updated = try spliceRegistry(arena.allocator(), original, "local", "  local:\n    schema.registry.url: http://new\n");
     try std.testing.expect(std.mem.indexOf(u8, updated, "schema.registry.url: http://new") != null);
     try std.testing.expect(std.mem.indexOf(u8, updated, "schema.registry.url: http://prod") != null);
     try std.testing.expect(std.mem.indexOf(u8, updated, "schema.registry.url: http://old") == null);

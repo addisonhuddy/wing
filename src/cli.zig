@@ -155,19 +155,186 @@ pub fn parse(alloc: std.mem.Allocator, args: []const []const u8) ParseResult {
 
 pub fn help(command: []const u8) []const u8 {
     if (std.mem.eql(u8, command, "ls"))
-        return "wing ls [TOPIC] [--key] [--json]\nList subjects or versions registered for a topic.\nOptions:\n  --key                 Select T-key instead of T-value.\n  --json                Print JSON lines instead of a table.\n  -h, --help            Show this help.\n";
+        return
+        \\Usage: wing ls [TOPIC] [--key] [--json]
+        \\
+        \\List schemas registered for a topic, or list versions for a subject.
+        \\
+        \\Options:
+        \\  --key                 Select the topic's key schema.
+        \\  --json                Print JSON instead of a table.
+        \\
+        \\Examples:
+        \\  wing ls
+        \\  wing ls orders
+        \\  wing ls orders --key --json
+        \\
+    ;
     if (std.mem.eql(u8, command, "get"))
-        return "wing get REF [--meta] [--key]\nPrint a registered JSON Schema.\nOptions:\n  --meta                Print the full registry envelope.\n  --key                 Select the topic key subject.\n  -h, --help            Show this help.\n";
+        return
+        \\Usage: wing get REF [--meta] [--key]
+        \\
+        \\Fetch a schema by topic, subject, version, or GUID.
+        \\
+        \\Options:
+        \\  --meta                Print the registry response envelope.
+        \\  --key                 Select the topic's key schema.
+        \\
+        \\Examples:
+        \\  wing get orders
+        \\  wing get orders@2
+        \\  wing get orders --meta
+        \\
+    ;
     if (std.mem.eql(u8, command, "rm"))
-        return "wing rm REF [-y] [--permanent] [--key]\nDelete a subject or one version.\nOptions:\n  -y, --yes             Skip terminal confirmation.\n  --permanent           Permanently delete after soft deletion.\n  --key                 Select the topic key subject.\n  -h, --help            Show this help.\n";
+        return
+        \\Usage: wing rm REF [-y] [--permanent] [--key]
+        \\
+        \\Delete a subject or one version. Deletion is soft by default.
+        \\
+        \\Options:
+        \\  -y                    Skip terminal confirmation.
+        \\  --permanent           Permanently delete after soft deletion.
+        \\  --key                 Select the topic's key schema.
+        \\
+        \\Examples:
+        \\  wing rm orders
+        \\  wing rm orders@2 -y
+        \\  wing rm orders --permanent -y
+        \\
+    ;
     if (std.mem.eql(u8, command, "registry"))
-        return "wing registry [list [--json] | set NAME | init]\nPick, list, or configure registries.\nOptions:\n  --json                Print registry names as JSON.\n  -h, --help            Show this help.\n";
-    if (std.mem.eql(u8, command, "read")) return "wing read [--check]\nRead kite --json records. Not implemented yet.\n";
-    if (std.mem.eql(u8, command, "write")) return "wing write [REF] [--fit] [--check]\nWrite kite --json records. Not implemented yet.\n";
+        return
+        \\Usage: wing registry [list [--json] | set NAME | init]
+        \\
+        \\List, select, or configure Schema Registry connections.
+        \\
+        \\Options:
+        \\  --json                Print registry names as JSON.
+        \\
+        \\Examples:
+        \\  wing registry list
+        \\  wing registry set prod
+        \\  wing registry init
+        \\
+    ;
+    if (std.mem.eql(u8, command, "read"))
+        return
+        \\Usage: wing read [OPTIONS] [@NAME]
+        \\
+        \\Read kite --json records, validate them, and add schema metadata.
+        \\
+        \\Options:
+        \\  --check               Validate without changing records.
+        \\
+        \\Examples:
+        \\  kite consume --json orders | wing read | jq .
+        \\
+    ;
+    if (std.mem.eql(u8, command, "write"))
+        return
+        \\Usage: wing write [REF] [OPTIONS] [@NAME]
+        \\
+        \\Validate JSON records and prepare them for kite produce.
+        \\
+        \\Options:
+        \\  --fit                 Fit records to the selected schema.
+        \\  --check               Validate without adding a header.
+        \\
+        \\Examples:
+        \\  wing write orders --fit
+        \\  wing write orders@latest | kite produce --json orders
+        \\
+    ;
     if (std.mem.eql(u8, command, "push"))
-        return "wing push TOPIC [OPTIONS]\nPublish a JSON Schema. Not implemented yet.\nOptions:\n  --check               Validate without registering.\n  --fixtures DIR        Validate example records.\n  --compat LEVEL        Set the compatibility level.\n  --meta                Read a wing get --meta envelope.\n  --key                 Register a key schema.\n";
-    if (std.mem.eql(u8, command, "update")) return "wing update [VERSION]\nInstall a wing release from addisonhuddy/wing.\n";
-    return "wing - Confluent Schema Registry CLI for JSON Schema\nUsage:\n  wing COMMAND [OPTIONS] [@NAME]\nCommands:\n  read       Read and validate kite records.\n  write      Validate and annotate records for production.\n  ls         List subjects or versions.\n  get        Fetch a schema.\n  push       Register a schema.\n  rm         Delete a schema subject or version.\n  registry   Configure registries.\n  update     Update wing.\nGlobal options:\n  --registry URL        Select a Schema Registry URL.\n  --config FILE         Use a config file instead of searching.\n  --schema-dir DIR      Set the offline schema cache.\n  --errors=json         Emit diagnostics as JSON lines.\n  -q, -v, -h, -V        Quiet, verbose, help, version.\n";
+        return
+        \\Usage: wing push TOPIC [OPTIONS] < schema.json
+        \\
+        \\Register a JSON Schema for a topic.
+        \\
+        \\Options:
+        \\  --check               Validate without registering.
+        \\  --fixtures DIR        Validate example records.
+        \\  --compat LEVEL        Set the compatibility level.
+        \\  --meta                Read a wing get --meta envelope.
+        \\  --key                 Register a key schema.
+        \\
+        \\Examples:
+        \\  wing push orders < orders.schema.json
+        \\  wing push orders --check < orders.schema.json
+        \\  wing push orders --meta < orders.meta.json
+        \\
+    ;
+    if (std.mem.eql(u8, command, "update"))
+        return
+        \\Usage: wing update [VERSION]
+        \\
+        \\Install a release from addisonhuddy/wing.
+        \\
+        \\Examples:
+        \\  wing update
+        \\  wing update v0.1.0
+        \\
+    ;
+    return
+    \\wing - Confluent Schema Registry CLI for JSON Schema
+    \\
+    \\Usage:
+    \\  wing read [OPTIONS] [@NAME]
+    \\  wing write [REF] [OPTIONS] [@NAME]
+    \\  wing ls [TOPIC] [--key] [--json]
+    \\  wing get REF [--meta] [--key]
+    \\  wing push TOPIC [OPTIONS] < schema.json
+    \\  wing rm REF [-y] [--permanent] [--key]
+    \\  wing registry [list|set NAME|init]
+    \\  wing update [VERSION]
+    \\
+    \\Select a named registry with @NAME; the explicit choice overrides
+    \\WING_TARGET and the current registry.
+    \\
+    \\Global options:
+    \\  --registry URL        Select a Schema Registry URL.
+    \\  --config FILE         Use a config file instead of searching.
+    \\  --schema-dir DIR      Set the offline schema cache.
+    \\  --errors=json         Emit diagnostics as JSON lines.
+    \\  -q, -v, -h, -V        Quiet, verbose, help, version.
+    \\
+    \\Examples:
+    \\  kite consume --json orders | wing read | jq '.id' |
+    \\    wing write --fit | kite produce --json orders
+    \\  wing ls orders
+    \\  wing get orders@latest
+    \\  wing push orders < orders.schema.json
+    \\
+    \\Configuration:
+    \\  Search: ./wing.yaml, ./wing.properties, XDG config, then ~/.config.
+    \\  Environment: SCHEMA_REGISTRY_URL, SCHEMA_REGISTRY_BASIC_AUTH_USER_INFO,
+    \\    SCHEMA_REGISTRY_BEARER_AUTH_TOKEN, WING_TARGET.
+    \\  Select the saved registry with: wing registry set NAME
+    \\
+    ;
+}
+
+pub fn usage(command: []const u8) []const u8 {
+    if (command.len == 0)
+        return "Usage: wing COMMAND [OPTIONS] [@NAME]\nTry 'wing --help' for the list of commands.\n";
+    if (std.mem.eql(u8, command, "ls"))
+        return "Usage: wing ls [TOPIC] [--key] [--json]\nTry 'wing ls --help' for examples.\n";
+    if (std.mem.eql(u8, command, "get"))
+        return "Usage: wing get REF [--meta] [--key]\nTry 'wing get --help' for examples.\n";
+    if (std.mem.eql(u8, command, "rm"))
+        return "Usage: wing rm REF [-y] [--permanent] [--key]\nTry 'wing rm --help' for examples.\n";
+    if (std.mem.eql(u8, command, "registry"))
+        return "Usage: wing registry [list|set NAME|init] [OPTIONS]\nTry 'wing registry --help' for examples.\n";
+    if (std.mem.eql(u8, command, "update"))
+        return "Usage: wing update [VERSION]\nTry 'wing update --help' for examples.\n";
+    if (std.mem.eql(u8, command, "read"))
+        return "Usage: wing read [OPTIONS]\nTry 'wing read --help' for examples.\n";
+    if (std.mem.eql(u8, command, "write"))
+        return "Usage: wing write [REF] [OPTIONS]\nTry 'wing write --help' for examples.\n";
+    if (std.mem.eql(u8, command, "push"))
+        return "Usage: wing push TOPIC [OPTIONS] < schema.json\nTry 'wing push --help' for examples.\n";
+    return usage("");
 }
 
 test "suggestions use adjacent-transposition edit distance" {
