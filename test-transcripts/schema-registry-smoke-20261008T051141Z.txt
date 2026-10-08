@@ -1,0 +1,67 @@
+$ curl GET http://localhost:8081/config
+{"compatibilityLevel":"BACKWARD"}
+$ register wing-phase1-1791436301-compat-compat-value v1 then try adding an optional property
+{"id":3,"version":1,"guid":"829b7819-0431-161a-0079-eb9d4cf0c17c","schemaType":"JSON","schema":"{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"integer\"}}}"}
+$ expected compatibility response (HTTP 409) for the open-model property addition
+{"error_code":409,"message":"Schema being registered is incompatible with an earlier schema for subject \"wing-phase1-1791436301-compat-value\", details: [{errorType:\"PROPERTY_ADDED_TO_OPEN_CONTENT_MODEL\", description:\"The new schema has an open content model and has a property or item at path '#/properties/label' which is missing in the old schema'}, {oldSchemaVersion: 1}, {oldSchema: '{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"integer\"}}}'}, {validateFields: 'false', compatibility: 'BACKWARD'}]"}
+HTTP 409
+
+$ register wing-phase1-1791436301-value (JSON)
+{"id":3,"version":1,"guid":"829b7819-0431-161a-0079-eb9d4cf0c17c","schemaType":"JSON","schema":"{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"integer\"}}}"}
+$ register wing-phase1-1791436301-key (JSON)
+{"id":4,"version":1,"guid":"2809284b-6e54-d0d3-4017-715ffe5636bd","schemaType":"JSON","schema":"{\"type\":\"string\"}"}
+$ register wing-phase1-1791436301.Record (RecordName-style; not a topic listing)
+{"id":5,"version":1,"guid":"c51f76a8-4e24-113b-db25-6d8bab180156","schemaType":"JSON","schema":"{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\"}}}"}
+$ register and soft-delete wing-phase1-1791436301-hidden-value
+{"id":4,"version":1,"guid":"2809284b-6e54-d0d3-4017-715ffe5636bd","schemaType":"JSON","schema":"{\"type\":\"string\"}"}[1]
+$ wing ls --json (TopicNameStrategy, default context)
+{"topic":"javahdr","versions":1,"compat":"BACKWARD"}
+{"topic":"javapfx","versions":1,"compat":"BACKWARD"}
+{"topic":"t1","versions":1,"compat":"BACKWARD"}
+{"topic":"wing-phase1-1791436206","versions":1,"compat":"BACKWARD"}
+{"topic":"wing-phase1-1791436242","versions":1,"compat":"BACKWARD"}
+{"topic":"wing-phase1-1791436301","versions":1,"compat":"BACKWARD"}
+{"topic":"wing-phase1-1791436301-compat","versions":1,"compat":"BACKWARD"}
+
+$ wing ls wing-phase1-1791436301 --json (value versions)
+{"version":1,"id":3,"guid":"829b7819-0431-161a-0079-eb9d4cf0c17c"}
+
+$ wing ls wing-phase1-1791436301 --key
+1
+
+$ wing get wing-phase1-1791436301@latest
+{"type":"object","properties":{"id":{"type":"integer"}}}
+
+$ wing get wing-phase1-1791436301 --meta
+{"topic":"wing-phase1-1791436301","version":1,"id":3,"guid":"829b7819-0431-161a-0079-eb9d4cf0c17c","compat":"BACKWARD","schema":"{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"integer\"}}}","references":null,"metadata":null,"ruleSet":null}
+
+$ wing get 829b7819-0431-161a-0079-eb9d4cf0c17c (GUID; two-hop lookup)
+{"type":"object","properties":{"id":{"type":"integer"}}}
+
+$ wing registry list --json
+{"file":"/tmp/tmp.5W9S4PEOKa/wing.yaml","current":"local","registries":["local"]}
+
+$ wing registry set local
+wing: registry set to 'local'
+
+$ wing registry list --json (current selection)
+{"file":"/tmp/tmp.5W9S4PEOKa/wing.yaml","current":"local","registries":["local"]}
+
+$ register wing-phase1-1791436301-remove-value then wing rm -y --permanent wing-phase1-1791436301-remove
+{"id":6,"version":1,"guid":"0422cabd-85f0-a43b-387d-ac6a4b7fa69c","schemaType":"JSON","schema":"{\"type\":\"object\",\"properties\":{\"rm\":{\"type\":\"boolean\"}}}"}wing: deleted wing-phase1-1791436301-remove-value
+
+$ verify soft-deleted and RecordName-style subjects are excluded
+{"topic":"javahdr","versions":1,"compat":"BACKWARD"}
+{"topic":"javapfx","versions":1,"compat":"BACKWARD"}
+{"topic":"t1","versions":1,"compat":"BACKWARD"}
+{"topic":"wing-phase1-1791436206","versions":1,"compat":"BACKWARD"}
+{"topic":"wing-phase1-1791436242","versions":1,"compat":"BACKWARD"}
+{"topic":"wing-phase1-1791436301","versions":1,"compat":"BACKWARD"}
+{"topic":"wing-phase1-1791436301-compat","versions":1,"compat":"BACKWARD"}
+PASS: hidden and RecordName-style subjects excluded
+
+Topic used: wing-phase1-1791436301
+
+$ verify /subjects/wing-phase1-1791436301-remove-value/versions after --permanent
+{"error_code":40401,"message":"Subject 'wing-phase1-1791436301-remove-value' not found."}
+HTTP 404

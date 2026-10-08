@@ -1,0 +1,11 @@
+$ wing registry list --json (initial default)
+{"file":"/tmp/tmp.y8JBmJShO7/wing.yaml","current":"first","registries":["first","second"]}
+
+$ wing registry set second
+wing: registry set to 'second'
+
+$ wing registry list --json (updated selection)
+{"file":"/tmp/tmp.y8JBmJShO7/wing.yaml","current":"second","registries":["first","second"]}
+
+$ current selection file
+second

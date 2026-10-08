@@ -1,0 +1,11 @@
+$ wing registry init (local Schema Registry, no credentials)
+Registry name (local): Schema Registry URL (http://localhost:8081): API key (empty for no auth): API secret (empty to leave it out): wing: connected: global compatibility, 11 subjects
+wing: wrote registry 'smoke' to /tmp/tmp.DqFieMd2jy/no-auth.yaml
+wing: registry set to 'smoke'
+wing: try: wing ls
+
+$ wing registry init (unreachable local endpoint; save anyway; dummy secret)
+Registry name (local): Schema Registry URL (http://localhost:8081): API key (empty for no auth): API secret (empty to leave it out): wing: connection check failed: Schema Registry request failed: ConnectionRefused
+Save anyway? [y/N] wing: wrote registry 'secure' to /tmp/tmp.DqFieMd2jy/secret.yaml
+wing: registry set to 'secure'
+wing: try: wing ls
