@@ -1,5 +1,6 @@
 const std = @import("std");
 const jv = @import("../jv.zig");
+const edit = @import("../text.zig");
 const number = @import("number.zig");
 const compile_mod = @import("compile.zig");
 const uri = @import("uri.zig");
@@ -167,7 +168,7 @@ fn visit(ctx: *Context, schema: *const compile_mod.Node, instance: *const jv.Nod
             for (enumeration.value.array) |candidate| if (equalValue(ctx.alloc, candidate, instance)) {
                 found = true;
             };
-            if (!found) try fail(ctx, schema, "value is not in enum", instance_path, "enum");
+            if (!found) try fail(ctx, schema, try enumMessage(ctx.alloc, enumeration.value.array, instance), instance_path, "enum");
         };
     }
 
@@ -791,6 +792,23 @@ fn keywordPath(ctx: *Context, schema: *const compile_mod.Node, name: []const u8)
     } else try compile_mod.keywordPath(ctx.alloc, schema.location, name);
     if (ctx.ref_prefix) |prefix| return std.fmt.allocPrint(ctx.alloc, "{s} -> {s}", .{ prefix, location });
     return location;
+}
+
+/// Names a bad string value and the closest allowed string, if one is near.
+fn enumMessage(alloc: std.mem.Allocator, candidates: []const *jv.Node, instance: *const jv.Node) ![]const u8 {
+    if (instance.value != .string) return "value is not in enum";
+    var best: ?[]const u8 = null;
+    var best_distance: usize = 3;
+    for (candidates) |candidate| if (candidate.value == .string) {
+        const candidate_distance = edit.distance(instance.value.string, candidate.value.string);
+        if (candidate_distance < best_distance) {
+            best = candidate.value.string;
+            best_distance = candidate_distance;
+        }
+    };
+    if (best) |suggestion|
+        return std.fmt.allocPrint(alloc, "value \"{s}\" is not in enum; did you mean \"{s}\"?", .{ instance.value.string, suggestion });
+    return std.fmt.allocPrint(alloc, "value \"{s}\" is not in enum", .{instance.value.string});
 }
 
 fn fail(ctx: *Context, schema: *const compile_mod.Node, message: []const u8, instance_path: *const InstancePath, keyword: []const u8) !void {

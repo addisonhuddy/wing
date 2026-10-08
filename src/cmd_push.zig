@@ -21,6 +21,12 @@ fn pushStderr(comptime fmt: []const u8, args: anytype) void {
     std.debug.print("wing push: " ++ fmt ++ "\n", args);
 }
 
+fn checkPassed(global: cli.Global) void {
+    if (global.quiet) return;
+    const diagnostics = app.Diagnostics.init("push", global);
+    if (diagnostics.json) diagnostics.note("ok") else diagnostics.print("wing push: ok", .{});
+}
+
 pub fn run(init: std.process.Init, global: cli.Global, args: []const []const u8) !void {
     const alloc = init.arena.allocator();
     var options: Options = .{};
@@ -111,7 +117,7 @@ pub fn run(init: std.process.Init, global: cli.Global, args: []const []const u8)
         lint_failed = (try checkFixtures(init, alloc, directory, &plan, global)) or lint_failed;
     if (lint_failed) std.process.exit(2);
 
-    if (options.topic == null) return;
+    if (options.topic == null) return checkPassed(global);
     if (settings.urls.len == 0)
         app.fatal("no Schema Registry configured; pass --registry URL, set SCHEMA_REGISTRY_URL, or run wing registry init", global.errors_json, "push");
     const subject = try app.subjectForTopic(alloc, options.topic.?, options.key);
@@ -128,7 +134,7 @@ pub fn run(init: std.process.Init, global: cli.Global, args: []const []const u8)
         if (options.compatibility != null) restoreCompatibility(&reg, escaped, compat_override);
         std.process.exit(2);
     }
-    if (options.check) return;
+    if (options.check) return checkPassed(global);
 
     if (reg.post(try std.fmt.allocPrint(alloc, "/subjects/{s}", .{escaped}), payload)) |existing_body| {
         const existing = std.json.parseFromSliceLeaky(std.json.Value, alloc, existing_body, .{
@@ -603,10 +609,14 @@ fn checkFixtures(init: std.process.Init, alloc: std.mem.Allocator, directory: []
             };
             const errors = try validator.validate(alloc, plan, document.root, .{});
             const expected_valid = std.mem.eql(u8, category, "valid");
-            if ((errors.len == 0) != expected_valid) {
-                try pushFinding(alloc, global, "", "", "fixture {s}/{s} did not {s}", .{
-                    category, entry.name, if (expected_valid) "pass" else "fail",
+            if (expected_valid and errors.len > 0) {
+                const first = errors[0];
+                try pushFinding(alloc, global, first.instanceLocation, first.keywordLocation, "fixture {s}/{s} did not pass: {s}: {s}", .{
+                    category, entry.name, if (first.instanceLocation.len == 0) "/" else first.instanceLocation, first.@"error",
                 });
+                failed = true;
+            } else if (!expected_valid and errors.len == 0) {
+                try pushFinding(alloc, global, "", "", "fixture {s}/{s} did not fail", .{ category, entry.name });
                 failed = true;
             }
         }

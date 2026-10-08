@@ -103,7 +103,7 @@ pub fn run(init: std.process.Init, global: cli.Global, args: []const []const u8)
         } else {
             try emitJsonLines(alloc, io, topic_rows.items, global.errors_json, "ls");
         }
-    } else if (isTty(io, std.Io.File.stdout())) {
+    } else {
         var out = std.Io.Writer.Allocating.init(alloc);
         if (topic != null) {
             var version_width: usize = "VERSION".len;
@@ -151,14 +151,6 @@ pub fn run(init: std.process.Init, global: cli.Global, args: []const []const u8)
                 try out.writer.writeAll(row.compat);
                 try out.writer.writeByte('\n');
             }
-        }
-        writeStdout(io, out.written(), global.errors_json, "ls");
-    } else {
-        var out = std.Io.Writer.Allocating.init(alloc);
-        if (topic != null) {
-            for (version_rows.items) |row| try out.writer.print("{d}\n", .{row.version});
-        } else {
-            for (topic_rows.items) |row| try out.writer.print("{s}\n", .{row.topic});
         }
         writeStdout(io, out.written(), global.errors_json, "ls");
     }

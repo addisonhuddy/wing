@@ -192,13 +192,13 @@ run_read_input_case read-check-unchanged 2 identical "no __value_schema_id heade
 run_read_input_case read-malformed-record 1 empty "expected a JSON record" '{"value":' read
 run_read_input_case read-empty-value 0 nonempty "1 empty" \
     '{"topic":"orders","value":"","headers":[]}' read
-run_read_input_case push-offline-check 0 empty empty '{"type":"object"}' push --check
+run_read_input_case push-offline-check 0 empty "wing push: ok" '{"type":"object"}' push --check
 run_read_input_case push-typo-keyword 2 empty "wing push: unknown keyword 'typ' at the root (did you mean 'type'?)" \
     '{"typ":"object"}' push --check
 run_push_lint_case push-unknown-keyword '{"tpye":"object"}' "" "did you mean 'type'?" \
     "wing push: unknown keyword 'tpye' at the root (did you mean 'type'?)"
-run_push_lint_case push-metaschema-enum '{"type":"objekt"}' "/type" "value is not in enum" \
-    "wing push: schema metaschema error at /properties/type/anyOf/0/\$ref -> /definitions/simpleTypes/enum: value is not in enum"
+run_push_lint_case push-metaschema-enum '{"type":"objekt"}' "/type" 'value "objekt" is not in enum; did you mean "object"?' \
+    "wing push: schema metaschema error at /properties/type/anyOf/0/\$ref -> /definitions/simpleTypes/enum: value \"objekt\" is not in enum; did you mean \"object\"?"
 mkdir -p "$TMP/push-fixtures/valid" "$TMP/push-fixtures/invalid"
 printf '%s\n' '{}' >"$TMP/push-fixtures/valid/missing-required.json"
 printf '%s\n' '{"x":1}' >"$TMP/push-fixtures/invalid/unexpected-valid.json"
@@ -216,7 +216,7 @@ set -e
     exit 1
 }
 printf '%s\n%s\n' \
-    "wing push: fixture valid/missing-required.json did not pass" \
+    "wing push: fixture valid/missing-required.json did not pass: /: missing required property 'x'" \
     "wing push: fixture invalid/unexpected-valid.json did not fail" >"$TMP/push-fixtures.expected"
 cmp -s "$TMP/push-fixtures.expected" "$TMP/push-fixtures.text.err" || {
     echo "FAIL push-fixtures text mode changed"

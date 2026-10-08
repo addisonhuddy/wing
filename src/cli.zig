@@ -1,4 +1,5 @@
 const std = @import("std");
+const distance = @import("text.zig").distance;
 
 pub const version = "0.1.0";
 pub const Global = struct {
@@ -33,21 +34,6 @@ const options = [_][]const u8{
     "--registry", "--config", "--schema-dir", "--errors", "--quiet",     "--verbose",  "--help",   "--version",
     "--key",      "--json",   "--meta",       "--yes",    "--permanent", "--fixtures", "--compat", "--check",
 };
-
-fn distance(a: []const u8, b: []const u8) usize {
-    if (a.len > 64 or b.len > 64) return 255;
-    var d: [66][66]u16 = undefined;
-    for (0..a.len + 1) |i| d[i][0] = @intCast(i);
-    for (0..b.len + 1) |j| d[0][j] = @intCast(j);
-    for (1..a.len + 1) |i| for (1..b.len + 1) |j| {
-        const cost: u16 = if (a[i - 1] == b[j - 1]) 0 else 1;
-        var best = @min(@min(d[i - 1][j] + 1, d[i][j - 1] + 1), d[i - 1][j - 1] + cost);
-        if (i > 1 and j > 1 and a[i - 1] == b[j - 2] and a[i - 2] == b[j - 1])
-            best = @min(best, d[i - 2][j - 2] + 1);
-        d[i][j] = best;
-    };
-    return d[a.len][b.len];
-}
 
 fn suggestion(name: []const u8) ?[]const u8 {
     var best: ?[]const u8 = null;
@@ -262,10 +248,12 @@ pub fn help(command: []const u8) []const u8 {
         \\Read kite --json records, validate them, and add schema metadata.
         \\
         \\Options:
-        \\  --check               Validate without changing records.
+        \\  --check               Output only records that fail validation (for a
+        \\                        dead-letter topic); exit 2 if any fail.
         \\
         \\Examples:
         \\  kite consume --json orders | wing read | jq .
+        \\  kite consume --json orders | wing read --check | kite produce --json dlq
         \\
     ;
     if (std.mem.eql(u8, command, "write"))
