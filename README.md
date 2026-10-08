@@ -74,6 +74,8 @@ What to expect:
 - **The GUID header carries schema identity.** `wing write` adds the
   Confluent `__value_schema_id` header. `wing read` resolves it, validates the
   value, strips the schema header, and adds schema details to the record.
+  Identity survives `jq` anywhere in the pipeline. This requires kite with
+  `--json` `_b64` support (next release).
 - **The consume is bounded.** `--from-beginning` reads the records already
   produced; `--max 2` stops after two records, with `--idle 3s` as a fallback.
 - **Invalid data exits 2.** `wing write` stops on the first invalid record,
@@ -313,12 +315,17 @@ subjects; a final positive integer after `:` pins a version.
 
 ## Record contract
 
-`read` and `write` accept kite `--json`: one JSON object per line, with
-`value` required and optional `topic`, `partition`, `offset`, `timestamp`,
-`key`, `headers`, and `schema`. Blank lines are skipped.
+`read` accepts kite `--json`: one JSON object per line, with `value` or
+`value_b64` and optional `topic`, `partition`, `offset`, `timestamp`, `key`,
+`headers`, and `schema`. `write` requires a JSON `value`. Blank lines are
+skipped.
 
 - A JSON string in `value` is the exact record byte sequence. An object or
   array value uses its original JSON source text.
+- `read` decodes top-level `key_b64` / `value_b64` and array-header
+  `value_b64` fields before handling payload prefixes and schema IDs; decoded
+  top-level fields do not pass through unchanged. `write` requires a JSON
+  value and rejects top-level `value_b64`.
 - `read` inlines a value only when its bytes are exactly one JSON object or
   array. Other values remain strings. It preserves record metadata and
   non-schema headers.
@@ -326,6 +333,9 @@ subjects; a final positive integer after `:` pins a version.
   (GUID format: `0x01` plus 16 bytes; legacy format: `0x00` plus a 4-byte ID)
   or a Confluent payload prefix. `read` removes schema headers/prefixes from
   transformed output and adds schema metadata under `.schema`.
+- Header identity remains intact through `jq` anywhere in the pipeline; this
+  requires kite with `--json` `_b64` support (next release). Base64 header
+  values are decoded before schema IDs are parsed.
 - `wing write --check` validates without adding a header. `wing read --check`
   emits only failed or changed records. Both return `2` when a record needs
   attention; pipe read-check output to a DLQ producer.

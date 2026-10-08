@@ -313,12 +313,16 @@ pub fn run(init: std.process.Init, global: cli.Global, args: []const []const u8)
         read_count += 1;
         _ = record_arena.reset(.retain_capacity);
         const line_alloc = record_arena.allocator();
+        const input_document = jv.parse(line_alloc, line) catch
+            fatalLine(global, line_number, "expected a JSON record; did you mean 'kite consume --json'?");
+        if (record.field(input_document.root, "value_b64") != null)
+            fatalLine(global, line_number, "value_b64 is not supported by wing write; values must be JSON");
         const input_record = record.Record.parse(line_alloc, line) catch
             fatalLine(global, line_number, "expected a JSON record; did you mean 'kite consume --json'?");
 
-        const value_bytes = try record.bytes(line_alloc, input_record.document, input_record.value);
+        const value_bytes = try input_record.payloadBytes(line_alloc, input_record.value);
         if (value_bytes.len == 0) empty += 1;
-        var value_part: Part = .{ .payload = value_bytes, .source_string = input_record.value.value == .string };
+        var value_part: Part = .{ .payload = value_bytes, .source_string = input_record.value.value == .string and input_record.value_b64_bytes == null };
         var value_info: ?*Info = null;
         if (value_bytes.len > 0) {
             value_info = try selectValue(&resolver, reference, input_record, line_number);
@@ -368,7 +372,7 @@ pub fn run(init: std.process.Init, global: cli.Global, args: []const []const u8)
         }
         if (input_record.key) |key_node| {
             if (key_node.value == .string) {
-                const key_bytes = try record.bytes(line_alloc, input_record.document, key_node);
+                const key_bytes = try input_record.payloadBytes(line_alloc, key_node);
                 if (key_info) |info| key_part = try preparePart(line_alloc, info, key_bytes, fit_enabled);
             } else if (key_node.value != .null_value) {
                 fatalLine(global, line_number, "key must be a string or null");
@@ -407,6 +411,8 @@ pub fn run(init: std.process.Init, global: cli.Global, args: []const []const u8)
         } else {
             const needs_render = record.field(input_record.document.root, "schema") != null or
                 hasSchemaHeaders(input_record) or
+                input_record.value_b64_bytes != null or
+                input_record.key_b64_bytes != null or
                 (value_part.payload.len > 0 and value_info != null) or
                 (key_part != null and key_info != null) or
                 value_part.changed or
@@ -489,15 +495,21 @@ fn renderRecord(
     var key_written = false;
     for (input.members) |member| {
         if (std.mem.eql(u8, member.key, "schema") or std.mem.eql(u8, member.key, "headers")) continue;
+        if (std.mem.eql(u8, member.key, "value_b64") or std.mem.eql(u8, member.key, "key_b64")) continue;
         if (std.mem.eql(u8, member.key, "value")) {
             try fieldPrefix(&output.writer, &first, "value");
             try writeValue(&output.writer, input.document, input.value, value);
             value_written = true;
         } else if (std.mem.eql(u8, member.key, "key")) {
-            try fieldPrefix(&output.writer, &first, "key");
             if (key) |part| {
-                if (part.changed) try record.writeString(&output.writer, part.payload) else try output.writer.writeAll(record.raw(input.document, member.value));
+                if (part.changed) {
+                    try writeKeyBytes(&output.writer, &first, part.payload);
+                } else {
+                    try fieldPrefix(&output.writer, &first, "key");
+                    try output.writer.writeAll(record.raw(input.document, member.value));
+                }
             } else {
+                try fieldPrefix(&output.writer, &first, "key");
                 try output.writer.writeAll(record.raw(input.document, member.value));
             }
             key_written = true;
@@ -511,15 +523,38 @@ fn renderRecord(
         try writeValue(&output.writer, input.document, input.value, value);
     }
     if (input.key != null and !key_written) {
-        try fieldPrefix(&output.writer, &first, "key");
-        if (key) |part| {
-            if (part.changed) try record.writeString(&output.writer, part.payload) else try output.writer.writeAll(record.raw(input.document, input.key.?));
-        } else try output.writer.writeAll(record.raw(input.document, input.key.?));
+        if (input.key_b64_bytes != null) {
+            try writeKeyBytes(
+                &output.writer,
+                &first,
+                if (key) |part| part.payload else input.key_b64_bytes.?,
+            );
+        } else if (key) |part| {
+            if (part.changed) {
+                try writeKeyBytes(&output.writer, &first, part.payload);
+            } else {
+                try fieldPrefix(&output.writer, &first, "key");
+                try output.writer.writeAll(record.raw(input.document, input.key.?));
+            }
+        } else {
+            try fieldPrefix(&output.writer, &first, "key");
+            try output.writer.writeAll(record.raw(input.document, input.key.?));
+        }
     }
     try fieldPrefix(&output.writer, &first, "headers");
     try writeHeaders(&output.writer, input, value, key, value_info, key_info);
     try output.writer.writeByte('}');
     return output.written();
+}
+
+fn writeKeyBytes(writer: *std.Io.Writer, first: *bool, bytes: []const u8) !void {
+    if (std.unicode.utf8ValidateSlice(bytes)) {
+        try fieldPrefix(writer, first, "key");
+        try record.writeString(writer, bytes);
+    } else {
+        try fieldPrefix(writer, first, "key_b64");
+        try record.writeBase64String(writer, bytes);
+    }
 }
 
 fn writeValue(writer: *std.Io.Writer, document: jv.Document, original: *const jv.Node, part: Part) !void {
@@ -561,9 +596,7 @@ fn writeHeaders(
         _ = header.encodeGuid(guid, &bytes);
         if (!first) try writer.writeByte(',');
         first = false;
-        try writer.writeAll("{\"key\":\"__value_schema_id\",\"value\":");
-        try record.writeString(writer, &bytes);
-        try writer.writeByte('}');
+        try writeSchemaHeader(writer, "__value_schema_id", &bytes);
     };
     if (key) |part| {
         _ = part;
@@ -572,12 +605,33 @@ fn writeHeaders(
             var bytes: [17]u8 = undefined;
             _ = header.encodeGuid(guid, &bytes);
             if (!first) try writer.writeByte(',');
-            try writer.writeAll("{\"key\":\"__key_schema_id\",\"value\":");
-            try record.writeString(writer, &bytes);
-            try writer.writeByte('}');
+            try writeSchemaHeader(writer, "__key_schema_id", &bytes);
         }
     }
     try writer.writeByte(']');
+}
+
+fn writeSchemaHeader(writer: *std.Io.Writer, name: []const u8, bytes: []const u8) !void {
+    try writer.writeAll("{\"key\":");
+    try record.writeString(writer, name);
+    try writer.writeAll(",\"value_b64\":");
+    try record.writeBase64String(writer, bytes);
+    try writer.writeByte('}');
+}
+
+test "schema header writer emits deterministic standard base64" {
+    const guid = try header.parseGuid("6da336d8-f1d3-0f98-4c47-d03ee8a14a12");
+    var bytes: [17]u8 = undefined;
+    _ = header.encodeGuid(guid, &bytes);
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer output.deinit();
+    try writeSchemaHeader(&output.writer, "__value_schema_id", &bytes);
+    try output.writer.writeByte(',');
+    try writeSchemaHeader(&output.writer, "__key_schema_id", &bytes);
+    try std.testing.expectEqualStrings(
+        "{\"key\":\"__value_schema_id\",\"value_b64\":\"AW2jNtjx0w+YTEfQPuihShI=\"},{\"key\":\"__key_schema_id\",\"value_b64\":\"AW2jNtjx0w+YTEfQPuihShI=\"}",
+        output.written(),
+    );
 }
 
 fn isSchemaHeader(name: []const u8) bool {
