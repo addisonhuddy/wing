@@ -180,6 +180,25 @@ pub fn load(
     env: *std.process.Environ.Map,
     global: anytype,
 ) !Settings {
+    return loadImpl(io, alloc, env, global, false);
+}
+
+pub fn loadAllowMissingRegistry(
+    io: std.Io,
+    alloc: std.mem.Allocator,
+    env: *std.process.Environ.Map,
+    global: anytype,
+) !Settings {
+    return loadImpl(io, alloc, env, global, true);
+}
+
+fn loadImpl(
+    io: std.Io,
+    alloc: std.mem.Allocator,
+    env: *std.process.Environ.Map,
+    global: anytype,
+    allow_missing_registry: bool,
+) !Settings {
     var s: Settings = .{};
     const explicit = global.config orelse envValue(env, "WING_CONFIG");
     var paths: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -332,7 +351,7 @@ pub fn load(
             return error.JavaTruststore;
     }
     if (s.insecure) warn("schema.registry.ssl.insecure is set; TLS certificate verification is disabled", .{});
-    if (s.urls.len == 0) return error.MissingRegistry;
+    if (s.urls.len == 0 and !allow_missing_registry) return error.MissingRegistry;
     return s;
 }
 

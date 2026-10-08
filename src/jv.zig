@@ -67,17 +67,19 @@ const Parser = struct {
     fn parseString(p: *Parser) ParseError![]const u8 {
         if (p.src[p.pos] != '"') return error.InvalidJson;
         p.pos += 1;
-        const start = p.pos;
+        const content_start = p.pos;
+        var escaped = false;
         while (p.pos < p.src.len) {
             const c = p.src[p.pos];
             if (c == '"') {
+                const content_end = p.pos;
                 p.pos += 1;
-                const raw = p.src[start .. p.pos - 1];
-                const parsed = std.json.parseFromSlice([]const u8, p.alloc, std.mem.concat(p.alloc, u8, &.{ "\"", raw, "\"" }) catch return error.OutOfMemory, .{ .allocate = .alloc_always }) catch return error.InvalidJson;
-                return parsed.value;
+                if (!escaped) return p.src[content_start..content_end];
+                return unescape(p.alloc, p.src[content_start..content_end]);
             }
             if (c < 0x20) return error.InvalidJson;
             if (c == '\\') {
+                escaped = true;
                 p.pos += 1;
                 if (p.pos >= p.src.len) return error.InvalidJson;
                 if (p.src[p.pos] == 'u') {
@@ -170,6 +172,50 @@ const Parser = struct {
         return result;
     }
 };
+
+fn unescape(alloc: std.mem.Allocator, source: []const u8) ParseError![]const u8 {
+    var output: std.ArrayListUnmanaged(u8) = .empty;
+    var index: usize = 0;
+    while (index < source.len) {
+        const byte = source[index];
+        if (byte != '\\') {
+            output.append(alloc, byte) catch return error.OutOfMemory;
+            index += 1;
+            continue;
+        }
+        index += 1;
+        if (index >= source.len) return error.InvalidJson;
+        switch (source[index]) {
+            '"', '\\', '/' => output.append(alloc, source[index]) catch return error.OutOfMemory,
+            'b' => output.append(alloc, 0x08) catch return error.OutOfMemory,
+            'f' => output.append(alloc, 0x0c) catch return error.OutOfMemory,
+            'n' => output.append(alloc, '\n') catch return error.OutOfMemory,
+            'r' => output.append(alloc, '\r') catch return error.OutOfMemory,
+            't' => output.append(alloc, '\t') catch return error.OutOfMemory,
+            'u' => {
+                if (index + 4 >= source.len) return error.InvalidJson;
+                var codepoint: u32 = std.fmt.parseInt(u16, source[index + 1 .. index + 5], 16) catch return error.InvalidJson;
+                index += 4;
+                if (codepoint >= 0xd800 and codepoint <= 0xdbff) {
+                    if (index + 6 >= source.len or source[index + 1] != '\\' or source[index + 2] != 'u')
+                        return error.InvalidJson;
+                    const low = std.fmt.parseInt(u16, source[index + 3 .. index + 7], 16) catch return error.InvalidJson;
+                    if (low < 0xdc00 or low > 0xdfff) return error.InvalidJson;
+                    codepoint = 0x10000 + ((codepoint - 0xd800) << 10) + @as(u32, low - 0xdc00);
+                    index += 6;
+                } else if (codepoint >= 0xdc00 and codepoint <= 0xdfff) {
+                    return error.InvalidJson;
+                }
+                var encoded: [4]u8 = undefined;
+                const length = std.unicode.utf8Encode(@intCast(codepoint), &encoded) catch return error.InvalidJson;
+                output.appendSlice(alloc, encoded[0..length]) catch return error.OutOfMemory;
+            },
+            else => return error.InvalidJson,
+        }
+        index += 1;
+    }
+    return output.toOwnedSlice(alloc) catch return error.OutOfMemory;
+}
 
 pub fn parse(alloc: std.mem.Allocator, src: []const u8) ParseError!Document {
     var p = Parser{ .alloc = alloc, .src = src };
@@ -305,6 +351,15 @@ test "JSON number source slice and escaped strings" {
     try std.testing.expectEqualStrings("1.00e+9", sourceSlice(doc, members[0].value));
     try std.testing.expectEqualStrings("line\nquote\"", members[1].value.value.string);
     try std.testing.expectEqualStrings(source, try stringify(arena.allocator(), doc.root));
+}
+
+test "escaped strings decode Unicode while raw high bytes remain unchanged" {
+    const alloc = std.testing.allocator;
+    const escaped = try parse(alloc, "\"\\u00ff\"");
+    try std.testing.expectEqualSlices(u8, &.{ 0xc3, 0xbf }, escaped.root.value.string);
+    const raw = [_]u8{ '"', 0xff, '"' };
+    const unescaped = try parse(alloc, &raw);
+    try std.testing.expectEqualSlices(u8, &.{0xff}, unescaped.root.value.string);
 }
 
 test "JSON parser rejects invalid numbers and trailing data" {

@@ -4,6 +4,7 @@ const schema = @import("schema/compile.zig");
 const validator = @import("schema/validate.zig");
 const regex = @import("regex.zig");
 const app = @import("app.zig");
+const record_io = @import("record_io.zig");
 
 pub fn validateCommand(init: std.process.Init, args: []const []const u8) !noreturn {
     const alloc = init.arena.allocator();
@@ -40,31 +41,41 @@ pub fn validateCommand(init: std.process.Init, args: []const []const u8) !noretu
 
     var stdin_buffer: [8192]u8 = undefined;
     var reader = std.Io.File.stdin().reader(init.io, &stdin_buffer);
+    var lines = record_io.LineReader.init(&reader.interface, alloc);
+    var stdout_buffer: [64 * 1024]u8 = undefined;
+    var writer = std.Io.File.stdout().writer(init.io, &stdout_buffer);
+    var record_arena = std.heap.ArenaAllocator.init(alloc);
+    defer record_arena.deinit();
     var invalid = false;
-    while (try reader.interface.takeDelimiter('\n')) |line| {
-        var record_arena = std.heap.ArenaAllocator.init(alloc);
-        defer record_arena.deinit();
+    while (try lines.next()) |line| {
+        defer _ = record_arena.reset(.retain_capacity);
         const record_alloc = record_arena.allocator();
         const instance = jv.parse(record_alloc, line) catch {
             invalid = true;
-            app.writeStdout(init.io, "invalid\ninvalid JSON instance\n", false, "_validate");
+            record_io.writeLine(&writer.interface, "invalid") catch
+                app.fatal("failed writing stdout", false, "_validate");
+            record_io.writeLine(&writer.interface, "invalid JSON instance") catch
+                app.fatal("failed writing stdout", false, "_validate");
             continue;
         };
         const errors = try validator.validate(record_alloc, &plan, instance.root, .{});
         if (errors.len == 0) {
-            app.writeStdout(init.io, "valid\n", false, "_validate");
+            record_io.writeLine(&writer.interface, "valid") catch
+                app.fatal("failed writing stdout", false, "_validate");
         } else {
             invalid = true;
-            app.writeStdout(init.io, "invalid\n", false, "_validate");
+            record_io.writeLine(&writer.interface, "invalid") catch
+                app.fatal("failed writing stdout", false, "_validate");
             for (errors) |failure| {
-                app.writeStdout(init.io, try std.fmt.allocPrint(record_alloc, "{s}: {s}: {s}\n", .{
+                writer.interface.print("{s}: {s}: {s}\n", .{
                     failure.instanceLocation,
                     failure.keywordLocation,
                     failure.@"error",
-                }), false, "_validate");
+                }) catch app.fatal("failed writing stdout", false, "_validate");
             }
         }
     }
+    writer.interface.flush() catch app.fatal("failed writing stdout", false, "_validate");
     std.process.exit(if (invalid) 2 else 0);
 }
 

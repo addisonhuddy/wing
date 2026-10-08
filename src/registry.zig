@@ -2,6 +2,9 @@ const std = @import("std");
 const http = @import("http.zig");
 const config = @import("config.zig");
 const header = @import("header.zig");
+const jv = @import("jv.zig");
+const schema_compile = @import("schema/compile.zig");
+const schema_cache = @import("schema_cache.zig");
 
 pub const Registry = struct {
     alloc: std.mem.Allocator,
@@ -107,6 +110,123 @@ pub const Registry = struct {
         const path = try std.fmt.allocPrint(self.alloc, "/schemas/guids/{s}", .{guid_text});
         const body = try self.get(path);
         return std.json.parseFromSliceLeaky(std.json.Value, self.alloc, body, .{ .allocate = .alloc_always, .parse_numbers = false });
+    }
+
+    pub fn schemaId(self: *Registry, id: u32) !std.json.Value {
+        const path = try std.fmt.allocPrint(self.alloc, "/schemas/ids/{d}", .{id});
+        const body = try self.get(path);
+        return std.json.parseFromSliceLeaky(std.json.Value, self.alloc, body, .{ .allocate = .alloc_always, .parse_numbers = false });
+    }
+
+    pub fn idLocation(self: *Registry, id: u32, key: bool) !struct { subject: ?[]const u8, version: ?[]const u8 } {
+        const path = try std.fmt.allocPrint(self.alloc, "/schemas/ids/{d}/versions", .{id});
+        const body = try self.get(path);
+        const locations = try std.json.parseFromSliceLeaky(std.json.Value, self.alloc, body, .{ .allocate = .alloc_always, .parse_numbers = false });
+        if (locations != .array) return .{ .subject = null, .version = null };
+        var best_subject: ?[]const u8 = null;
+        var best_version: ?[]const u8 = null;
+        for (locations.array.items) |entry| {
+            if (objectValue(entry, "context")) |context| {
+                if (stringValue(context)) |name| if (!std.mem.eql(u8, name, ".")) continue;
+            }
+            const subject = stringValue(objectValue(entry, "subject") orelse continue) orelse continue;
+            const suffix = if (key) "-key" else "-value";
+            if (!std.mem.endsWith(u8, subject, suffix) or std.mem.indexOfScalar(u8, subject, ':') != null) continue;
+            const version = if (objectValue(entry, "version")) |value| try valueText(self.alloc, value) else continue;
+            const earlier_subject = best_subject == null or std.mem.lessThan(u8, subject, best_subject.?);
+            const earlier_version = best_subject != null and std.mem.eql(u8, subject, best_subject.?) and
+                (std.fmt.parseInt(u64, version, 10) catch std.math.maxInt(u64)) <
+                    (std.fmt.parseInt(u64, best_version.?, 10) catch std.math.maxInt(u64));
+            if (earlier_subject or earlier_version) {
+                best_subject = subject;
+                best_version = version;
+            }
+        }
+        return .{ .subject = best_subject, .version = best_version };
+    }
+
+    pub fn idAnyLocation(self: *Registry, id: u32) !struct { subject: ?[]const u8, version: ?[]const u8 } {
+        const path = try std.fmt.allocPrint(self.alloc, "/schemas/ids/{d}/versions", .{id});
+        const body = try self.get(path);
+        const locations = try std.json.parseFromSliceLeaky(std.json.Value, self.alloc, body, .{ .allocate = .alloc_always, .parse_numbers = false });
+        if (locations != .array) return .{ .subject = null, .version = null };
+        var best_subject: ?[]const u8 = null;
+        var best_version: ?[]const u8 = null;
+        for (locations.array.items) |entry| {
+            if (objectValue(entry, "context")) |context| {
+                if (stringValue(context)) |name| if (!std.mem.eql(u8, name, ".")) continue;
+            }
+            const subject = stringValue(objectValue(entry, "subject") orelse continue) orelse continue;
+            const version = if (objectValue(entry, "version")) |value| try valueText(self.alloc, value) else continue;
+            if (best_subject == null or std.mem.lessThan(u8, subject, best_subject.?)) {
+                best_subject = subject;
+                best_version = version;
+            } else if (std.mem.eql(u8, subject, best_subject.?)) {
+                const candidate = std.fmt.parseInt(u64, version, 10) catch std.math.maxInt(u64);
+                const current = std.fmt.parseInt(u64, best_version.?, 10) catch std.math.maxInt(u64);
+                if (candidate < current) best_version = version;
+            }
+        }
+        return .{ .subject = best_subject, .version = best_version };
+    }
+
+    pub fn referenceResources(
+        self: *Registry,
+        schema_value: std.json.Value,
+        cache_directory: ?[]const u8,
+    ) ![]const schema_compile.ResourceSource {
+        var resources: std.ArrayListUnmanaged(schema_compile.ResourceSource) = .empty;
+        var names: std.StringHashMapUnmanaged(void) = .empty;
+        try self.collectReferences(schema_value, &resources, &names, cache_directory);
+        return resources.toOwnedSlice(self.alloc);
+    }
+
+    fn collectReferences(
+        self: *Registry,
+        schema_value: std.json.Value,
+        resources: *std.ArrayListUnmanaged(schema_compile.ResourceSource),
+        names: *std.StringHashMapUnmanaged(void),
+        cache_directory: ?[]const u8,
+    ) !void {
+        const references = objectValue(schema_value, "references") orelse return;
+        if (references != .array) return error.InvalidResponse;
+        for (references.array.items) |reference| {
+            const name = stringValue(objectValue(reference, "name") orelse return error.InvalidResponse) orelse return error.InvalidResponse;
+            const subject = stringValue(objectValue(reference, "subject") orelse return error.InvalidResponse) orelse return error.InvalidResponse;
+            const version_value = objectValue(reference, "version") orelse return error.InvalidResponse;
+            const version = try valueText(self.alloc, version_value);
+            if (names.contains(name)) continue;
+            try names.put(self.alloc, name, {});
+
+            const referenced = try self.schema(subject, version);
+            const schema_text = stringValue(objectValue(referenced, "schema") orelse return error.InvalidResponse) orelse return error.InvalidResponse;
+            const document = try jv.parse(self.alloc, schema_text);
+            try resources.append(self.alloc, .{ .uri = name, .document = document });
+            if (cache_directory) |directory| {
+                if (stringValue(objectValue(referenced, "guid") orelse .null)) |guid| {
+                    const topic = if (std.mem.endsWith(u8, subject, "-value"))
+                        subject[0 .. subject.len - "-value".len]
+                    else if (std.mem.endsWith(u8, subject, "-key"))
+                        subject[0 .. subject.len - "-key".len]
+                    else
+                        null;
+                    const metadata = .{
+                        .topic = topic,
+                        .version = objectValue(referenced, "version") orelse version_value,
+                        .id = objectValue(referenced, "id"),
+                        .guid = objectValue(referenced, "guid"),
+                        .compat = self.compat(subject) catch "BACKWARD",
+                        .schema = objectValue(referenced, "schema"),
+                        .references = objectValue(referenced, "references"),
+                        .metadata = objectValue(referenced, "metadata"),
+                        .ruleSet = objectValue(referenced, "ruleSet"),
+                        .subject = subject,
+                    };
+                    schema_cache.write(self.client.io, self.alloc, directory, guid, metadata) catch {};
+                }
+            }
+            try self.collectReferences(referenced, resources, names, cache_directory);
+        }
     }
 
     pub fn guidLocation(self: *Registry, guid_text: []const u8, key: bool) !struct { subject: ?[]const u8, version: ?[]const u8 } {

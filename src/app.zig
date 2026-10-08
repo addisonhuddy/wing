@@ -121,7 +121,18 @@ pub fn commandFromArgs(args: []const []const u8) []const u8 {
 }
 
 pub fn settingsFor(init: std.process.Init, global: cli.Global, command: []const u8) config.Settings {
-    var settings = config.load(init.io, init.arena.allocator(), init.environ_map, global) catch |err| {
+    return settingsForMode(init, global, command, false);
+}
+
+pub fn settingsForCache(init: std.process.Init, global: cli.Global, command: []const u8) config.Settings {
+    return settingsForMode(init, global, command, true);
+}
+
+fn settingsForMode(init: std.process.Init, global: cli.Global, command: []const u8, allow_missing_registry: bool) config.Settings {
+    var settings = (if (allow_missing_registry)
+        config.loadAllowMissingRegistry(init.io, init.arena.allocator(), init.environ_map, global)
+    else
+        config.load(init.io, init.arena.allocator(), init.environ_map, global)) catch |err| {
         if (err == error.NoSuchRegistry) {
             const alloc = init.arena.allocator();
             if (config.registryNames(alloc, init.io, init.environ_map, global)) |data| {
@@ -176,7 +187,11 @@ pub fn settingsFor(init: std.process.Init, global: cli.Global, command: []const 
             const chain = std.mem.join(init.arena.allocator(), " > ", sources.items) catch "";
             stderr("config from {s}", .{chain});
         }
-        stderr("{s}", .{registryDescription(init.arena.allocator(), global, settings)});
+        if (settings.urls.len > 0) {
+            stderr("{s}", .{registryDescription(init.arena.allocator(), global, settings)});
+        } else if (settings.schema_dir) |directory| {
+            stderr("schema cache {s}", .{directory});
+        }
     }
     return settings;
 }
