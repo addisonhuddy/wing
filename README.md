@@ -43,49 +43,42 @@ and [kite](https://github.com/addisonhuddy/kite) for Kafka record movement.
 
 ## Quickstart
 
-![10-second demo: push a schema, write records, and read them with kite](examples/demo.gif)
+![10-second demo: push a schema, write and read records through kite, fit CSV records](examples/demo.gif)
 
-### 1. Check a schema offline
-
-No Kafka or Schema Registry needed:
+You need Kafka at `localhost:9092` and Schema Registry at `localhost:8081`
+(e.g. the Docker ones in
+[Run Kafka and Schema Registry locally with Docker](#run-kafka-and-schema-registry-locally-with-docker)),
+[kite](https://github.com/addisonhuddy/kite) v0.4.0 or later, and
+[`jq`](https://jqlang.github.io/jq/) for the last line only. Use a fresh topic
+name so the output is exactly one record.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/addisonhuddy/wing/main/install.sh | sh
-wing push --check --fixtures examples/fixtures < examples/orders.schema.json
-# wing push: ok
+export SCHEMA_REGISTRY_URL=http://localhost:8081 BOOTSTRAP_SERVERS=localhost:9092
+echo '{"type":"object","properties":{"id":{"type":"integer"}}}' | wing push events  # register a schema
+echo '{"id":1}' | wing write events | kite produce --json events       # validate, add schema header, produce
+kite consume -B -n 1 --idle 3s --json events | wing read | jq -c .value  # prints: {"id":1}
 ```
 
-Records in `examples/fixtures/valid/` must pass and records in
-`examples/fixtures/invalid/` must fail. A mistake exits 2 and says what to fix:
+`wing write` adds the Confluent schema header; `wing read` resolves it and
+validates again. Records go to stdout and diagnostics to stderr, so `jq` only
+sees data. A record that does not match exits 2 and nothing is produced:
 
 ```sh
+echo '{"id":"one"}' | wing write events | kite produce --json events
+# wing write: line 1: /id: expected integer, got string [/properties/id/type]
+```
+
+No Kafka? Check a schema and its fixtures offline:
+
+```sh
+wing push --check --fixtures examples/fixtures < examples/orders.schema.json
+# wing push: ok
 echo '{"type":"objet"}' | wing push --check; echo "exit $?"
 # wing push: schema metaschema error at /properties/type/anyOf/0/$ref -> /definitions/simpleTypes/enum: value "objet" is not in enum; did you mean "object"?
 # exit 2
 ```
 
-### 2. Write and read records through Kafka
-
-This needs Kafka at `localhost:9092`, Schema Registry at `localhost:8081`
-([run both with Docker](#run-kafka-and-schema-registry-locally-with-docker)),
-and kite v0.4.0 or later and `jq` on `PATH`.
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/addisonhuddy/kite/main/install.sh | sh
-export BOOTSTRAP_SERVERS=localhost:9092
-export SCHEMA_REGISTRY_URL=http://localhost:8081
-wing push orders < examples/orders.schema.json
-wing write orders < examples/orders.jsonl | kite produce --json orders
-kite consume --from-beginning --max 2 --idle 3s --json orders |
-  wing read |
-  jq -c .value
-# {"order_id":1,"customer":"Ada","total":12.5}
-# {"order_id":2,"customer":"Grace","total":21}
-```
-
-`wing write` validates each line and adds the Confluent schema header;
-`wing read` resolves it and validates again. Records go to stdout and
-diagnostics to stderr, so `jq` only sees data. Invalid data exits 2.
 More recipes are in [Examples](#examples).
 
 ## Why wing
