@@ -41,7 +41,28 @@ _wing() {
             ;;
     esac
 
+    if [[ $cur != -* ]]; then
+        case "$cmd" in
+            "")
+                opts="get ls push read registry rm update write"
+                ;;
+            registry)
+                if [ -z "$sub" ]; then
+                    opts="list set init"
+                else
+                    opts=""
+                fi
+                ;;
+            *)
+                opts=""
+                ;;
+        esac
+        COMPREPLY=($(compgen -W "$opts" -- "$cur"))
+        return
+    fi
+
     case "$cmd" in
+        "") opts="-V --version -h --help" ;;
         read) opts="--check" ;;
         write) opts="--fit --check" ;;
         ls) opts="--key --json" ;;
@@ -56,9 +77,6 @@ _wing() {
             fi
             ;;
         update) opts="" ;;
-        *)
-            opts="read write ls get push rm registry update -V --version"
-            ;;
     esac
     opts="$opts --registry --config --schema-dir --errors -q --quiet -v --verbose -h --help"
     COMPREPLY=($(compgen -W "$opts" -- "$cur"))

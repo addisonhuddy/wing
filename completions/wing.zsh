@@ -23,17 +23,58 @@ _wing() {
         '(-v --verbose)'{-v,--verbose}'[verbose diagnostics]'
         '(-h --help)'{-h,--help}'[show help]'
     )
-    if [[ "$words[CURRENT]" == @* ]]; then
-        _wing_at_targets
+
+    case "$words[CURRENT-1]" in
+        --errors)
+            compadd json
+            return
+            ;;
+        --compat)
+            compadd BACKWARD BACKWARD_TRANSITIVE FORWARD FORWARD_TRANSITIVE FULL FULL_TRANSITIVE NONE
+            return
+            ;;
+        --config | --schema-dir | --fixtures)
+            _files
+            return
+            ;;
+        --registry)
+            return
+            ;;
+    esac
+
+    if [[ "$words[CURRENT]" != -* ]]; then
+        if [[ "$words[CURRENT]" == @* ]]; then
+            _wing_at_targets
+            return
+        fi
+        if (( CURRENT == 2 )); then
+            compadd get ls push read registry rm update write
+            return
+        fi
+        if [[ "$words[2]" == registry ]] && (( CURRENT == 3 )); then
+            compadd list set init
+            return
+        fi
+        if [[ "$words[2]" == registry && "$words[3]" == set ]] && (( CURRENT == 4 )); then
+            _wing_registry_names
+            return
+        fi
         return
     fi
+
     if (( CURRENT == 2 )); then
         _arguments -s \
             '(-V --version)'{-V,--version}'[print version]' \
             '(-h --help)'{-h,--help}'[show help]' \
-            '1:command:(read write ls get push rm registry update)'
+            '--registry[Schema Registry URL]:url:' \
+            '--config[read this configuration file]:file:_files' \
+            '--schema-dir[offline schema cache]:directory:_files -/' \
+            '--errors[diagnostic format]:format:(json)' \
+            '(-q --quiet)'{-q,--quiet}'[suppress summaries]' \
+            '(-v --verbose)'{-v,--verbose}'[verbose diagnostics]'
         return
     fi
+
     case "$words[2]" in
         read)
             _arguments -s $global '--check[validate without changing records]' '*:registry target:_wing_at_targets'
