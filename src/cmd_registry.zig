@@ -35,7 +35,7 @@ pub fn run(init: std.process.Init, global: cli.Global, args: []const []const u8)
         for (args[action_index..]) |arg| if (!std.mem.eql(u8, arg, "--json"))
             fatal(optionError(arg, &.{"--json"}) orelse "unexpected argument", global.errors_json, "registry");
         if (global.target != null) fatal("use 'wing registry set NAME' to switch registries", global.errors_json, "registry");
-        const data = config.registryNames(init.arena.allocator(), init.io, init.environ_map, global) catch fatal("no config file found", global.errors_json, "registry");
+        const data = config.registryNames(init.arena.allocator(), init.io, init.environ_map, global) catch fatal("no config file found; run 'wing registry init' to create one", global.errors_json, "registry");
         const picker = implicit_list and isTty(init.io, std.Io.File.stdin()) and isTty(init.io, std.Io.File.stderr());
         if (has(args, "--json")) {
             try emitJson(init.arena.allocator(), init.io, .{ .file = data.file, .current = data.current, .registries = data.names }, global.errors_json, "registry");
@@ -84,7 +84,7 @@ pub fn run(init: std.process.Init, global: cli.Global, args: []const []const u8)
     } else if (std.mem.eql(u8, action, "set")) {
         const name = argAt(args, 1) orelse fatal("missing NAME", global.errors_json, "registry");
         if (args.len != 2) fatal("unexpected argument", global.errors_json, "registry");
-        const data = config.registryNames(init.arena.allocator(), init.io, init.environ_map, global) catch fatal("no config file found", global.errors_json, "registry");
+        const data = config.registryNames(init.arena.allocator(), init.io, init.environ_map, global) catch fatal("no config file found; run 'wing registry init' to create one", global.errors_json, "registry");
         var found = false;
         for (data.names) |item| {
             if (std.mem.eql(u8, item, name)) found = true;

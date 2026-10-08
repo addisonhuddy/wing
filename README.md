@@ -45,13 +45,32 @@ and [kite](https://github.com/addisonhuddy/kite) for Kafka record movement.
 
 ![10-second demo: push a schema, write records, and read them with kite](examples/demo.gif)
 
-You need Kafka at `localhost:9092`, Schema Registry at `localhost:8081`
-([run both with Docker](#run-kafka-and-schema-registry-locally-with-docker)),
-and `kite` and `jq` on `PATH`. The commands use a fresh topic named `orders`;
-the schema and two sample records are in `examples/`.
+### 1. Check a schema offline
+
+No Kafka or Schema Registry needed:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/addisonhuddy/wing/main/install.sh | sh
+wing push --check --fixtures examples/fixtures < examples/orders.schema.json
+# wing push: ok
+```
+
+Records in `examples/fixtures/valid/` must pass and records in
+`examples/fixtures/invalid/` must fail. A mistake exits 2 and says what to fix:
+
+```sh
+echo '{"type":"objet"}' | wing push --check; echo "exit $?"
+# wing push: schema metaschema error at /properties/type/anyOf/0/$ref -> /definitions/simpleTypes/enum: value "objet" is not in enum; did you mean "object"?
+# exit 2
+```
+
+### 2. Write and read records through Kafka
+
+This needs Kafka at `localhost:9092`, Schema Registry at `localhost:8081`
+([run both with Docker](#run-kafka-and-schema-registry-locally-with-docker)),
+and kite v0.4.0 or later and `jq` on `PATH`.
+
+```sh
 curl -fsSL https://raw.githubusercontent.com/addisonhuddy/kite/main/install.sh | sh
 export BOOTSTRAP_SERVERS=localhost:9092
 export SCHEMA_REGISTRY_URL=http://localhost:8081
@@ -64,24 +83,10 @@ kite consume --from-beginning --max 2 --idle 3s --json orders |
 # {"order_id":2,"customer":"Grace","total":21}
 ```
 
-What to expect:
-
-- **stdout is data; stderr is diagnostics.** `wing write` sends JSONL records
-  to kite and writes its summary to stderr. `wing read` writes transformed
-  records to stdout; `jq` sees no summaries or warnings.
-- **The GUID header carries schema identity.** `wing write` adds the
-  Confluent `__value_schema_id` header. `wing read` resolves it, validates the
-  value, strips the schema header, and adds schema details to the record.
-  Identity survives `jq` anywhere in the pipeline. This requires kite v0.4.0
-  or later with `--json` `_b64` support.
-- **The consume is bounded.** `--from-beginning` reads the records already
-  produced; `--max 2` stops after two records, with `--idle 3s` as a fallback.
-- **Invalid data exits 2.** `wing write` stops on the first invalid record,
-  flushing earlier complete records. `wing read` annotates validation errors;
-  use `--check` to send only records needing attention to a dead-letter topic.
-
-The CSV `--fit` path is in [Examples](#examples). For a local broker, use the
-[Docker setup](#run-kafka-and-schema-registry-locally-with-docker).
+`wing write` validates each line and adds the Confluent schema header;
+`wing read` resolves it and validates again. Records go to stdout and
+diagnostics to stderr, so `jq` only sees data. Invalid data exits 2.
+More recipes are in [Examples](#examples).
 
 ## Why wing
 
@@ -105,44 +110,10 @@ The CSV `--fit` path is in [Examples](#examples). For a local broker, use the
 
 ## For AI agents
 
-Use these facts when selecting or calling `wing`:
-
-- **Name / repository:** `wing`, [`addisonhuddy/wing`](https://github.com/addisonhuddy/wing).
-- **License / language / platforms:** Apache-2.0, Zig, Linux and macOS on
-  x86_64 and aarch64.
-- **Install:** `curl -fsSL https://raw.githubusercontent.com/addisonhuddy/wing/main/install.sh | sh`.
-- **Configure:** `SCHEMA_REGISTRY_URL`, `--registry URL`, or `wing.yaml`;
-  `@NAME` selects a named registry.
-- **Read / write:** `wing read` and `wing write [REF]` consume and emit
-  one kite JSON record per line. `wing write --fit` fits before validation.
-- **Registry operations:** `wing ls`, `wing get`, `wing push`, `wing rm`, and
-  `wing registry list|set|init`.
-- **REF:** a topic, `TOPIC:VERSION`, `TOPIC:latest` (get/write), an explicit
-  subject, or a GUID. `@NAME` is only registry selection. `orders@3` is
-  rejected with a hint to use `orders:3`. `rm` accepts integer versions only.
-- **Contract:** data on stdout, diagnostics on stderr; exit `0` success,
-  `1` usage/configuration/Registry/tool failure, `2` invalid data/schema or
-  failed check, `130` interrupt/termination. `--errors=json` requests
-  structured diagnostics.
-  Commands do not prompt off-TTY; `rm` requires `-y`.
-- **Does not do:** Avro/Protobuf, remote `$ref`, application serialization,
-  Kafka administration, or consumer-group management.
-
-```text
-wing read [--check]                 # kite JSONL stdin -> validated JSONL stdout
-wing write [REF] [--fit]            # validate/fit and add schema headers
-wing push TOPIC < schema.json       # lint/register a JSON Schema
-wing get REF [--meta]               # fetch schema or metadata envelope
-wing ls [TOPIC] [--key]             # list subjects/versions
-wing rm REF -y                      # soft-delete a subject or version
-wing registry list|set NAME|init    # inspect/select/configure a Registry
-# REF: TOPIC, TOPIC:VERSION, TOPIC:latest, subject, or GUID; @NAME selects Registry
-# stdout=data; stderr=diagnostics; exits=0/1/2/130; no non-TTY prompts
-# use --errors=json for structured diagnostics
-```
-
-See [`llms.txt`](llms.txt) for the stable machine-readable contract and
-[`TESTING.md`](TESTING.md) for test guidance.
+[`llms.txt`](llms.txt) is the stable machine-readable contract: commands,
+REF syntax, the record format, streams, and exit codes. `wing --help` and
+`wing COMMAND --help` list every flag. See [`TESTING.md`](TESTING.md) for
+test guidance.
 
 ## Install
 
@@ -196,109 +167,161 @@ cp completions/wing.fish $__fish_config_dir/completions/
 
 ## Command reference
 
-```text
-Usage:
-  wing read [OPTIONS] [@NAME]
-  wing write [REF] [OPTIONS] [@NAME]
-  wing ls [TOPIC] [--key] [--json]
-  wing get REF [--meta] [--key]
-  wing push TOPIC [OPTIONS] < schema.json
-  wing rm REF [-y] [--permanent] [--key]
-  wing registry [list|set NAME|init]
-  wing update [VERSION]
-```
-
-`TOPIC` may be omitted for offline `wing push --check`.
-
-| Command | Flags |
-| --- | --- |
-| `read` | `--check` |
-| `write` | `--fit`, `--check` |
-| `ls` | `--key`, `--json` |
-| `get` | `--meta`, `--key` |
-| `push` | `--check`, `--fixtures DIR`, `--compat LEVEL`, `--meta`, `--key` |
-| `rm` | `-y`, `--permanent`, `--key` |
-| `registry list` | `--json` |
-| `update` | optional `VERSION` |
-
-Global options: `--registry URL`, `--config FILE`, `--schema-dir DIR`,
-`--errors=json`, `-q`, `-v`, `-h`, and `-V`.
-Use `@NAME` on a command to select a configured Registry.
-`--key` selects the topic's key schema for `ls`, `get`, `push`, and `rm`;
-`write` selects a key schema when the input record has a key.
+Run `wing --help` for the command list and `wing COMMAND --help` for flags
+and examples. Global options: `--registry URL`, `--config FILE`,
+`--schema-dir DIR`, `--errors=json`, `-q`, `-v`, `-h`, and `-V`. Add `@NAME`
+to a command to select a configured Registry.
 
 ## Examples
 
 These recipes use a configured Schema Registry and kite on `PATH`.
 
-```sh
-# Lint and validate the valid/invalid fixture directories without registering.
-wing push --check --fixtures examples/fixtures < examples/orders.schema.json
+### Lint a schema and its fixtures offline
 
-# Register a base schema, then check backward compatibility.
+Validates `valid/` and `invalid/` fixtures without registering.
+
+```sh
+wing push --check --fixtures examples/fixtures < examples/orders.schema.json
+```
+
+### Check backward compatibility
+
+Register a base schema, then check backward compatibility.
+
+```sh
 wing push orders-compat --compat BACKWARD < examples/orders.schema.json
 # exits 2 and prints the incompatible paths
 jq '.properties.order_id.type = "string"' examples/orders.schema.json |
   wing push orders-compat
+```
 
-# Publish a key schema; --key addresses the <topic>-key subject.
+### Publish a key schema
+
+`--key` addresses the `<topic>-key` subject.
+
+```sh
 wing push orders --key < examples/orders-key.schema.json
+```
 
-# Pin a schema version, then inspect its metadata envelope.
+### Pin a version and inspect metadata
+
+Pin a schema version, then inspect its metadata envelope.
+
+```sh
 wing get orders:1
 wing get orders --meta | jq '{topic,version,guid}'
+```
 
-# Copy schema metadata (including references) to another topic.
+### Copy a schema to another topic
+
+Copy schema metadata (including references) to another topic.
+
+```sh
 wing get orders --meta | wing push orders-copy --meta
+```
 
-# Consume and validate records, keeping only each decoded value.
+### Validate consumed records
+
+Consume and validate records, keeping only each decoded value.
+
+```sh
 kite consume --from-beginning --max 2 --idle 3s --json orders |
   wing read |
   jq -c .value
+```
 
-# Save raw records now; filter with jq and decode later (the schema header survives jq).
+### Filter saved records with jq, decode later
+
+Save raw records now. filter with jq and decode later (the schema header survives jq).
+
+```sh
 kite consume --from-beginning --max 2 --idle 3s --json orders > orders.jsonl
 jq -c 'select(.offset == 1)' orders.jsonl | wing read
+```
 
-# Route failed records from orders-bad into a dead-letter topic.
+### Route failed records to a dead-letter topic
+
+Route failed records from orders-bad into a dead-letter topic.
+
+```sh
 kite consume --from-beginning --max 1 --idle 3s --json orders-bad |
   wing read --check |
   kite produce --json orders-dlq
+```
 
-# CSV fields arrive as strings; --fit coerces them and applies currency's default.
+### Fit CSV records to a schema
+
+CSV fields arrive as strings. `--fit` coerces them and applies currency's default.
+
+```sh
 kite produce --csv orders-csv < examples/orders.csv
 kite consume --from-beginning --max 2 --idle 3s --json orders-csv |
   wing write orders --fit |
   kite produce --json orders
+```
 
-# Keep a jq edit in the record pipeline; write validates the changed value.
+### Edit records with jq and re-validate
+
+Keep a jq edit in the record pipeline. write validates the changed value.
+
+```sh
 kite consume --from-beginning --max 2 --idle 3s --json orders |
   wing read |
   jq -c '.value.total += 1' |
   wing write orders --fit |
   kite produce --json orders
+```
 
-# Records from Confluent's Java JSON Schema serializer (legacy 0x00 prefix or GUID header) read the same way.
+### Read records from Confluent's Java serializer
+
+Records from Confluent's Java JSON Schema serializer (legacy 0x00 prefix or GUID header) read the same way.
+
+```sh
 kite consume --from-beginning --max 1 --idle 3s --json legacy-orders | wing read
+```
 
-# Register a relative reference; get bundles the referenced schema.
+### Register a schema with a reference
+
+Register a relative reference. get bundles the referenced schema.
+
+```sh
 wing push money < examples/money.schema.json
 wing push invoice --meta < examples/invoice.meta.json
 wing get invoice
+```
 
-# Later reads with every GUID cached make no Registry requests.
+### Read offline from the schema cache
+
+Later reads with every GUID cached make no Registry requests.
+
+```sh
 kite consume --from-beginning --max 2 --idle 3s --json orders > batch.jsonl
 wing read --schema-dir ~/.cache/wing/schemas < batch.jsonl
+```
 
-# Requires prod to be configured in wing.yaml (see Multiple registries).
+### List subjects on another registry
+
+Requires prod to be configured in wing.yaml (see Multiple registries).
+
+```sh
 wing ls @prod
+```
 
-# Pipe structured schema diagnostics from stderr into jq.
+### Structured diagnostics with --errors=json
+
+Pipe structured schema diagnostics from stderr into jq.
+
+```sh
 jq '{tpye: "object"}' examples/orders.schema.json |
   wing push --check --errors=json 2>&1 >/dev/null |
   jq -c .
+```
 
-# Create then remove version 2; rm requires -y in a non-interactive pipeline.
+### Remove a schema version
+
+Create then remove version 2. `rm` requires `-y` in a non-interactive pipeline.
+
+```sh
 wing push orders-versions < examples/orders.schema.json >/dev/null
 jq '.description = "temporary README example version"' examples/orders.schema.json |
   wing push orders-versions >/dev/null
