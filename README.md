@@ -260,7 +260,7 @@ kite consume --from-beginning --max 2 --idle 3s --json orders |
 
 # Save raw records now; filter with jq and decode later (the schema header survives jq).
 kite consume --from-beginning --max 2 --idle 3s --json orders > orders.jsonl
-jq -c 'select(.key == null)' orders.jsonl | wing read
+jq -c 'select(.offset == 1)' orders.jsonl | wing read
 
 # Route failed records from orders-bad into a dead-letter topic.
 kite consume --from-beginning --max 1 --idle 3s --json orders-bad |
