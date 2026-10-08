@@ -39,7 +39,7 @@ pub fn run(init: std.process.Init, global: cli.Global, args: []const []const u8)
         fatal("rm requires a subject or subject:version, not a GUID", global.errors_json, "rm");
     const parsed = app.parseReference(ref, false) catch |err| switch (err) {
         error.LegacyAtSyntax => fatal(app.legacyReferenceMessage(init.arena.allocator(), ref), global.errors_json, "rm"),
-        error.InvalidVersion => fatal("version must be 'latest' or a positive integer", global.errors_json, "rm"),
+        error.InvalidVersion => fatal("version must be a positive integer", global.errors_json, "rm"),
     };
     if (!yes and !isTty(init.io, std.Io.File.stderr()))
         fatal("refusing to delete without -y (stderr is not a terminal)", global.errors_json, "rm");
