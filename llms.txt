@@ -10,7 +10,7 @@ with kite, a Kafka CLI, using one JSON record per line.
 - `wing write [REF] [--fit]` validates records, applies schema-directed
   fitting when requested, and adds the selected GUID schema header.
 - Schema-header identity survives `jq` anywhere in the pipeline; this requires
-  kite with `--json` `_b64` support (next release).
+  kite v0.4.0 or later with `--json` `_b64` support.
 - `wing push [TOPIC]` lints and registers a JSON Schema. `--check` lints
   without registering; `--meta` reads/writes registry metadata envelopes.
 - `wing get REF` prints schema text; `--meta` prints

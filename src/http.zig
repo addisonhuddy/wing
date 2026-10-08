@@ -73,14 +73,18 @@ pub const Client = struct {
             } else if (self.bearer) |token| {
                 try extra.append(self.alloc, .{ .name = "Authorization", .value = try std.fmt.allocPrint(self.alloc, "Bearer {s}", .{token}) });
             }
+            const configured_header_start = extra.items.len;
             for (self.headers) |entry| {
                 if (std.mem.indexOfScalar(u8, entry, '=')) |sep|
                     try extra.append(self.alloc, .{ .name = entry[0..sep], .value = entry[sep + 1 ..] });
             }
             if (self.debug) {
                 std.debug.print("WING_DEBUG request {s} {s}\n", .{ @tagName(method), url });
-                for (extra.items) |header| {
-                    const value = if (std.ascii.eqlIgnoreCase(header.name, "Authorization")) "[redacted]" else header.value;
+                for (extra.items, 0..) |header, index| {
+                    const value = if (index >= configured_header_start or std.ascii.eqlIgnoreCase(header.name, "Authorization"))
+                        "[redacted]"
+                    else
+                        header.value;
                     std.debug.print("WING_DEBUG > {s}: {s}\n", .{ header.name, value });
                 }
                 if (payload) |body| std.debug.print("WING_DEBUG > {s}\n", .{body});

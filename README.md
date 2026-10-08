@@ -74,8 +74,8 @@ What to expect:
 - **The GUID header carries schema identity.** `wing write` adds the
   Confluent `__value_schema_id` header. `wing read` resolves it, validates the
   value, strips the schema header, and adds schema details to the record.
-  Identity survives `jq` anywhere in the pipeline. This requires kite with
-  `--json` `_b64` support (next release).
+  Identity survives `jq` anywhere in the pipeline. This requires kite v0.4.0
+  or later with `--json` `_b64` support.
 - **The consume is bounded.** `--from-beginning` reads the records already
   produced; `--max 2` stops after two records, with `--idle 3s` as a fallback.
 - **Invalid data exits 2.** `wing write` stops on the first invalid record,
@@ -337,7 +337,7 @@ skipped.
   or a Confluent payload prefix. `read` removes schema headers/prefixes from
   transformed output and adds schema metadata under `.schema`.
 - Header identity remains intact through `jq` anywhere in the pipeline; this
-  requires kite with `--json` `_b64` support (next release). Base64 header
+  requires kite v0.4.0 or later with `--json` `_b64` support. Base64 header
   values are decoded before schema IDs are parsed.
 - `wing write --check` validates without adding a header. `wing read --check`
   emits only failed or changed records. Both return `2` when a record needs
