@@ -1,1 +1,2 @@
-{"topic":"orders","key":"{\"order_id\":42}","value":"{\"order_id\":42,\"customer\":\"Ada\",\"total\":17.5}","headers":[]}
+{"order_id":1,"customer":"Ada","total":12.5}
+{"order_id":2,"customer":"Grace","total":21}

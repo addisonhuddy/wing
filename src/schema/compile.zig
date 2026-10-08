@@ -6,10 +6,11 @@ const uri = @import("uri.zig");
 const number = @import("number.zig");
 
 pub const Draft = metaschemas.Draft;
+pub const default_base_uri = "https://wing.invalid/root";
 pub const MetaRegistration = struct { uri: []const u8, draft: Draft };
 pub const Options = struct {
     default_draft: Draft = .draft07,
-    base_uri: []const u8 = "urn:wing:schema",
+    base_uri: []const u8 = default_base_uri,
     registered_metaschemas: []const MetaRegistration = &.{},
     extra_resources: []const ResourceSource = &.{},
 };
@@ -349,13 +350,16 @@ pub fn compile(alloc: std.mem.Allocator, document: jv.Document, options: Options
     var builder: Builder = .{ .alloc = alloc, .plan = &plan, .draft = draft, .vocabularies = vocabularies };
     plan.root = try builder.compileNode(document.root, "#", options.base_uri);
     for (options.extra_resources) |resource| {
-        const root = try builder.compileNode(resource.document.root, resource.uri, resource.uri);
-        var registered = false;
-        for (plan.resources.items) |existing| if (std.mem.eql(u8, existing.uri, resource.uri)) {
-            registered = true;
-            break;
-        };
-        if (!registered) try plan.resources.append(alloc, .{ .uri = resource.uri, .root = root });
+        const resolved_uri = try uri.resolve(alloc, plan.root.base_uri, resource.uri);
+        const root = try builder.compileNode(resource.document.root, resource.uri, resolved_uri);
+        for ([_][]const u8{ resource.uri, resolved_uri, baseWithoutFragment(root.base_uri) }) |resource_name| {
+            var registered = false;
+            for (plan.resources.items) |existing| if (sameSchemaUri(existing.uri, resource_name)) {
+                registered = true;
+                break;
+            };
+            if (!registered) try plan.resources.append(alloc, .{ .uri = resource_name, .root = root });
+        }
     }
     if (containsEmbeddedReference(document.root)) {
         const main_vocabularies = builder.vocabularies;
@@ -435,7 +439,7 @@ pub fn resolveReference(alloc: std.mem.Allocator, plan: *const Plan, from: *cons
     const hash = std.mem.indexOfScalar(u8, resolved, '#') orelse resolved.len;
     const resource_uri = resolved[0..hash];
     var resource: ?Resource = null;
-    if (resource_uri.len == 0 or std.mem.eql(u8, resource_uri, "urn:wing:schema")) {
+    if (resource_uri.len == 0 or sameSchemaUri(resource_uri, baseWithoutFragment(plan.root.base_uri))) {
         resource = .{ .uri = resource_uri, .root = plan.root };
     } else {
         for (plan.resources.items) |candidate| {
@@ -692,6 +696,18 @@ test "reference resolution honors pointer escapes and HTTP aliases" {
     const meta = try resolveReference(alloc, &meta_plan, meta_plan.root, "http://json-schema.org/draft-07/schema#");
     try std.testing.expectEqualStrings("https://json-schema.org/draft-07/schema", meta.location);
     try std.testing.expectEqualStrings("https://json-schema.org/draft-07/schema#/$schema", meta.keywords[0].location);
+}
+
+test "relative references resolve against the default base and referenced ids" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const root = try jv.parse(alloc, "{\"$ref\":\"./money.json#/properties/amount\"}");
+    const money = try jv.parse(alloc, "{\"$id\":\"money.json\",\"type\":\"object\",\"properties\":{\"amount\":{\"type\":\"number\"}}}");
+    const resources = [_]ResourceSource{.{ .uri = "money.json", .document = money }};
+    const plan = try compile(alloc, root, .{ .extra_resources = &resources });
+    const resolved = try resolveReference(alloc, &plan, plan.root, "./money.json#/properties/amount");
+    try std.testing.expectEqualStrings("number", field(resolved.schema, "type").?.value.string);
 }
 
 test "draft keywords and custom vocabularies are gated" {

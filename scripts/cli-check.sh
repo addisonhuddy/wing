@@ -105,7 +105,13 @@ run_case no-args 1 empty "wing: missing command"
 run_case no-args-help 1 empty "Try 'wing --help'"
 run_case unknown-command 1 empty "unknown command 'lis'; did you mean 'ls'?" lis
 run_case unknown-option 1 empty "unknown option '--jsn' (did you mean '--json'?)" ls --jsn
+run_case unknown-option-write 1 empty "unknown option '--fitt' (did you mean '--fit'?)" write --fitt
+run_case unknown-option-get 1 empty "unknown option '--metaa' (did you mean '--meta'?)" get --metaa
+run_case unknown-option-push 1 empty "unknown option '--chek' (did you mean '--check'?)" push --chek
+run_case unknown-option-registry 1 empty "unknown option '--jsn' (did you mean '--json'?)" registry --jsn
 run_case missing-topic 1 empty "missing REF" get
+run_case push-no-topic 1 empty "wing: push needs a TOPIC (use 'wing push --check' to lint offline)" push
+run_case push-empty 1 empty "wing push: no schema on stdin" push --check
 run_case missing-name 1 empty "missing NAME" registry set
 run_case update-bad-tag 1 empty "'main' is not a release tag (want e.g. v0.1.0)" update main
 run_case update-extra 1 empty "unexpected argument 'v2'" update v1 v2
@@ -219,6 +225,9 @@ EOF
 cat >"$TMP/schema-cache/55555555-5555-5555-5555-555555555555.json" <<'EOF'
 {"topic":"currency","version":1,"id":11,"guid":"55555555-5555-5555-5555-555555555555","compat":"BACKWARD","schema":"{\"type\":\"object\",\"properties\":{\"currency\":{\"type\":\"string\",\"default\":\"USD\"}},\"additionalProperties\":false}","references":null,"metadata":null,"ruleSet":null,"subject":"currency-value"}
 EOF
+cat >"$TMP/schema-cache/eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee.json" <<'EOF'
+{"topic":"offline","version":4,"id":12,"guid":"eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee","compat":"BACKWARD","schema":"{\"type\":\"object\"}","references":null,"metadata":null,"ruleSet":null,"subject":"offline-value"}
+EOF
 chmod 600 "$TMP/schema-cache/"*.json
 mkdir -p "$TMP/cache-work"
 run_read_input_case read-offline-cache-guid 0 nonempty "1 read, 1 passed, 0 failed" \
@@ -316,6 +325,46 @@ run_read_input_case write-fit-drop-quiet 2 identical "drop-extra removed /extra 
 run_read_input_case write-key-offline-cache 2 identical "keys are validated because offline-key exists" \
     '{"key":"\"bad\"","value":"{}","schema":{"value":{"guid":"11111111-1111-1111-1111-111111111111"},"key":{"guid":"44444444-4444-4444-4444-444444444444"}}}' \
     --workdir "$TMP/cache-work" --schema-dir "$TMP/schema-cache" write --check
+run_read_input_case write-missing-schema 1 empty \
+    "wing write: line 1: no schema for this record; pass a topic (wing write TOPIC) or keep the schema field from wing read" \
+    '{"value":"{}"}' write
+
+printf '%s\n' '{"value":"{\"x\":1}","schema":{"value":{"guid":"eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"}}}' >"$TMP/tty.input"
+(
+    cd "$TMP/cache-work"
+    HOME="$TMP/home" XDG_CONFIG_HOME="$TMP/xdg" \
+        "$BIN" --quiet --schema-dir "$TMP/schema-cache" write <"$TMP/tty.input" \
+        >"$TMP/tty-write.pipe" 2>"$TMP/tty-write.pipe.err"
+)
+tty_command="stty -echo; WING_COLOR=always '$BIN' --quiet --schema-dir '$TMP/schema-cache' write < '$TMP/tty.input' 2>/dev/null"
+script -qc "$tty_command" /dev/null >"$TMP/tty-write.raw"
+tty_command="stty -echo; WING_COLOR=always '$BIN' --quiet --schema-dir '$TMP/schema-cache' read < '$TMP/tty-write.pipe' 2>/dev/null"
+script -qc "$tty_command" /dev/null >"$TMP/tty-read.raw"
+(
+    cd "$TMP/cache-work"
+    HOME="$TMP/home" XDG_CONFIG_HOME="$TMP/xdg" \
+        "$BIN" --quiet --schema-dir "$TMP/schema-cache" read <"$TMP/tty-write.pipe" \
+        >"$TMP/tty-read.pipe" 2>"$TMP/tty-read.pipe.err"
+)
+python3 - "$TMP/tty-write.raw" "$TMP/tty-write.stripped" "$TMP/tty-read.raw" "$TMP/tty-read.stripped" <<'PY'
+import re
+import sys
+
+for source, destination in zip(sys.argv[1::2], sys.argv[2::2]):
+    data = open(source, "rb").read()
+    data = re.sub(rb"\x1b\[[0-?]*[ -/]*[@-~]", b"", data).replace(b"\r", b"")
+    open(destination, "wb").write(data)
+PY
+cmp -s "$TMP/tty-write.stripped" "$TMP/tty-write.pipe" &&
+    cmp -s "$TMP/tty-read.stripped" "$TMP/tty-read.pipe" || {
+    echo "FAIL tty JSON coloring differs from piped records"
+    exit 1
+}
+python3 - "$TMP/tty-write.pipe" <<'PY'
+import sys
+assert any(byte >= 0x80 for byte in open(sys.argv[1], "rb").read())
+PY
+echo "PASS tty JSON coloring preserves pipe bytes"
 
 mkdir -p "$TMP/props"
 cat >"$TMP/props/wing.properties" <<'EOF'

@@ -25,5 +25,12 @@ with kite, a Kafka CLI, using one JSON record per line.
   `@NAME` selects a named registry for one invocation.
 - `--errors=json` writes structured diagnostic lines to stderr; `-q` suppresses
   summaries; `-v` adds provenance and fitting changes.
+- Per-record diagnostics, notes, and summaries are prefixed `wing read:` or
+  `wing write:`. Missing write schema uses:
+  `no schema for this record; pass a topic (wing write TOPIC) or keep the schema field from wing read`.
+- `wing push` without a topic requires `--check` for offline linting; empty
+  stdin reports `wing push: no schema on stdin`.
+- Compatibility failures identify the subject, latest version, and
+  compatibility level, with JSON Pointer paths in text and JSON diagnostics.
 
 See README.md for commands, options, configuration precedence, and pipelines.

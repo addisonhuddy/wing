@@ -106,11 +106,51 @@ pub fn run(init: std.process.Init, global: cli.Global, args: []const []const u8)
     } else if (isTty(io, std.Io.File.stdout())) {
         var out = std.Io.Writer.Allocating.init(alloc);
         if (topic != null) {
-            try out.writer.writeAll("VERSION  ID       GUID\n");
-            for (version_rows.items) |row| try out.writer.print("{d:<8} {d:<8} {s}\n", .{ row.version, row.id, row.guid });
+            var version_width: usize = "VERSION".len;
+            var id_width: usize = "ID".len;
+            var guid_width: usize = "GUID".len;
+            for (version_rows.items) |row| {
+                version_width = @max(version_width, (try std.fmt.allocPrint(alloc, "{d}", .{row.version})).len);
+                id_width = @max(id_width, (try std.fmt.allocPrint(alloc, "{d}", .{row.id})).len);
+                guid_width = @max(guid_width, row.guid.len);
+            }
+            try term.writeTableCell(&out.writer, "VERSION", version_width);
+            try out.writer.writeAll("  ");
+            try term.writeTableCell(&out.writer, "ID", id_width);
+            try out.writer.writeAll("  ");
+            try term.writeTableCell(&out.writer, "GUID", guid_width);
+            try out.writer.writeByte('\n');
+            for (version_rows.items) |row| {
+                try term.writeTableCell(&out.writer, try std.fmt.allocPrint(alloc, "{d}", .{row.version}), version_width);
+                try out.writer.writeAll("  ");
+                try term.writeTableCell(&out.writer, try std.fmt.allocPrint(alloc, "{d}", .{row.id}), id_width);
+                try out.writer.writeAll("  ");
+                try out.writer.writeAll(row.guid);
+                try out.writer.writeByte('\n');
+            }
         } else {
-            try out.writer.writeAll("TOPIC                           VERSIONS  COMPAT\n");
-            for (topic_rows.items) |row| try out.writer.print("{s:<31} {d:<9} {s}\n", .{ row.topic, row.versions, row.compat });
+            var topic_width: usize = "TOPIC".len;
+            var versions_width: usize = "VERSIONS".len;
+            var compat_width: usize = "COMPAT".len;
+            for (topic_rows.items) |row| {
+                topic_width = @max(topic_width, row.topic.len);
+                versions_width = @max(versions_width, (try std.fmt.allocPrint(alloc, "{d}", .{row.versions})).len);
+                compat_width = @max(compat_width, row.compat.len);
+            }
+            try term.writeTableCell(&out.writer, "TOPIC", topic_width);
+            try out.writer.writeAll("  ");
+            try term.writeTableCell(&out.writer, "VERSIONS", versions_width);
+            try out.writer.writeAll("  ");
+            try term.writeTableCell(&out.writer, "COMPAT", compat_width);
+            try out.writer.writeByte('\n');
+            for (topic_rows.items) |row| {
+                try term.writeTableCell(&out.writer, row.topic, topic_width);
+                try out.writer.writeAll("  ");
+                try term.writeTableCell(&out.writer, try std.fmt.allocPrint(alloc, "{d}", .{row.versions}), versions_width);
+                try out.writer.writeAll("  ");
+                try out.writer.writeAll(row.compat);
+                try out.writer.writeByte('\n');
+            }
         }
         writeStdout(io, out.written(), global.errors_json, "ls");
     } else {

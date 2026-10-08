@@ -16,8 +16,11 @@ pub fn fatal(message: []const u8, json_errors: bool, command: []const u8) noretu
         std.json.Stringify.value(.{ .kind = "error", .command = command, .message = message }, .{}, &out.writer) catch {};
         std.debug.print("{s}\n", .{out.written()});
     } else {
-        if (std.mem.eql(u8, command, "push")) {
-            std.debug.print("wing push: {s}\n", .{message});
+        if (std.mem.eql(u8, command, "push") or std.mem.eql(u8, command, "get") or
+            std.mem.eql(u8, command, "ls") or std.mem.eql(u8, command, "rm") or
+            std.mem.eql(u8, command, "registry"))
+        {
+            std.debug.print("wing {s}: {s}\n", .{ command, message });
         } else {
             stderr("{s}", .{message});
         }
@@ -96,7 +99,7 @@ pub fn optionError(arg: []const u8, suggestions: []const []const u8) ?[]const u8
     for (suggestions) |valid| {
         if (std.mem.eql(u8, arg, valid)) return null;
     }
-    return cli.optionError(std.heap.page_allocator, arg);
+    return cli.optionErrorFor(std.heap.page_allocator, arg, suggestions);
 }
 
 pub fn errorsRequested(args: []const []const u8) bool {

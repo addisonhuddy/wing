@@ -42,16 +42,24 @@ pub fn run(init: std.process.Init, global: cli.Global, args: []const []const u8)
         } else if (!picker) {
             var out = std.Io.Writer.Allocating.init(init.arena.allocator());
             const terminal = isTty(init.io, std.Io.File.stdout());
-            for (data.names) |name| {
-                const selected = data.current != null and std.mem.eql(u8, name, data.current.?);
-                if (terminal) {
-                    try out.writer.print("{s}{s}\n", .{ if (selected) "* " else "  ", name });
-                } else {
+            if (terminal) {
+                var name_width: usize = "NAME".len;
+                for (data.names) |name| name_width = @max(name_width, name.len);
+                try term.writeTableCell(&out.writer, "NAME", name_width);
+                try out.writer.writeAll("  CURRENT\n");
+                for (data.names) |name| {
+                    const selected = data.current != null and std.mem.eql(u8, name, data.current.?);
+                    try term.writeTableCell(&out.writer, name, name_width);
+                    try out.writer.print("  {s}\n", .{if (selected) "*" else ""});
+                }
+            } else {
+                for (data.names) |name| {
+                    const selected = data.current != null and std.mem.eql(u8, name, data.current.?);
                     try out.writer.print("{s}{s}\n", .{ name, if (selected) " *" else "" });
                 }
             }
             writeStdout(init.io, out.written(), global.errors_json, "registry");
-            if (!global.quiet) stderr("registries from {s}", .{data.file});
+            if (!global.quiet) std.debug.print("wing registry: registries from {s}\n", .{data.file});
         }
         if (picker and data.names.len > 0) {
             var prompt = std.Io.Writer.Allocating.init(init.arena.allocator());
@@ -71,7 +79,7 @@ pub fn run(init: std.process.Init, global: cli.Global, args: []const []const u8)
             }
             const name = selected orelse fatal("unknown registry selection", global.errors_json, "registry");
             try setCurrentRegistry(init, name);
-            stderr("registry set to '{s}'", .{name});
+            std.debug.print("wing registry: registry set to '{s}'\n", .{name});
         }
     } else if (std.mem.eql(u8, action, "set")) {
         const name = argAt(args, 1) orelse fatal("missing NAME", global.errors_json, "registry");
@@ -83,7 +91,7 @@ pub fn run(init: std.process.Init, global: cli.Global, args: []const []const u8)
         }
         if (!found) fatal(try std.fmt.allocPrint(init.arena.allocator(), "no registry '{s}' in {s}", .{ name, data.file }), global.errors_json, "registry");
         try setCurrentRegistry(init, name);
-        if (!global.quiet) stderr("registry set to '{s}'", .{name});
+        if (!global.quiet) std.debug.print("wing registry: registry set to '{s}'\n", .{name});
     } else if (std.mem.eql(u8, action, "init")) {
         if (args.len != 1) fatal("unexpected argument", global.errors_json, "registry");
         try runRegistryInit(init, global);
@@ -202,9 +210,16 @@ fn runRegistryInit(init: std.process.Init, global: cli.Global) !void {
     const settings: config.Settings = .{ .urls = url, .basic_auth = creds };
     var reg = registryFor(init, settings);
     var connection_ok = true;
-    if (reg.get("/config")) |_| {} else |err| {
+    var compatibility_level: []const u8 = "BACKWARD";
+    if (reg.get("/config")) |value| {
+        const config_value = std.json.parseFromSliceLeaky(std.json.Value, alloc, value, .{
+            .allocate = .alloc_always,
+            .parse_numbers = false,
+        }) catch .null;
+        compatibility_level = registry_mod.stringValue(registry_mod.objectValue(config_value, "compatibilityLevel") orelse .null) orelse "BACKWARD";
+    } else |err| {
         connection_ok = false;
-        stderr("connection check failed: {s}", .{reg.last_error orelse @errorName(err)});
+        std.debug.print("wing registry: connection check failed: {s}\n", .{reg.last_error orelse @errorName(err)});
     }
     var schema_count: usize = 0;
     var subject_values: std.json.Value = .null;
@@ -213,7 +228,7 @@ fn runRegistryInit(init: std.process.Init, global: cli.Global) !void {
             subject_values = value;
         } else |err| {
             connection_ok = false;
-            stderr("connection check failed: {s}", .{reg.last_error orelse @errorName(err)});
+            std.debug.print("wing registry: connection check failed: {s}\n", .{reg.last_error orelse @errorName(err)});
         }
         if (subject_values == .array) schema_count = subject_values.array.items.len;
     }
@@ -221,7 +236,7 @@ fn runRegistryInit(init: std.process.Init, global: cli.Global) !void {
         const answer = nextAnswer(reader, alloc, "Save anyway? [y/N] ") orelse "";
         if (!std.ascii.eqlIgnoreCase(answer, "y") and !std.ascii.eqlIgnoreCase(answer, "yes")) fatal("aborted", global.errors_json, "registry");
     } else {
-        stderr("connected: global compatibility, {d} subjects", .{schema_count});
+        stderr("connected to {s} ({d} subjects, compatibility {s})", .{ url, schema_count, compatibility_level });
     }
 
     const qurl = try yamlScalar(alloc, url);
@@ -245,10 +260,10 @@ fn runRegistryInit(init: std.process.Init, global: cli.Global) !void {
     defer current.close(init.io);
     try current.writeStreamingAll(init.io, name);
     if (!global.quiet) {
-        stderr("wrote registry '{s}' to {s}", .{ name, path });
-        stderr("registry set to '{s}'", .{name});
-        stderr("try: wing ls", .{});
-        if (api_key.len > 0 and creds == null) stderr("set SCHEMA_REGISTRY_BASIC_AUTH_USER_INFO=KEY:SECRET to use API authentication", .{});
+        std.debug.print("wing registry: wrote registry '{s}' to {s}\n", .{ name, path });
+        std.debug.print("wing registry: registry set to '{s}'\n", .{name});
+        std.debug.print("wing registry: try: wing ls\n", .{});
+        if (api_key.len > 0 and creds == null) std.debug.print("wing registry: set SCHEMA_REGISTRY_BASIC_AUTH_USER_INFO=KEY:SECRET to use API authentication\n", .{});
     }
 }
 

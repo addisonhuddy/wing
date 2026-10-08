@@ -170,7 +170,11 @@ const Resolver = struct {
             try self.schemas.put(self.alloc, try self.guidKey(guid_text), info);
             if (!was_cached and self.settings.schema_dir != null)
                 self.writeCache(info) catch |err| {
-                    if (!self.global.quiet) app.stderr("could not write schema cache for GUID '{s}': {s}", .{ guid_text, @errorName(err) });
+                    if (!self.global.quiet) readNote(self.global, std.fmt.allocPrint(
+                        self.alloc,
+                        "wing read: could not write schema cache for GUID '{s}': {s}",
+                        .{ guid_text, @errorName(err) },
+                    ) catch "wing read: could not write schema cache");
                 };
         }
         return info;
@@ -221,7 +225,7 @@ const Resolver = struct {
         const key = info.guid orelse info.subject orelse return;
         if (self.warned_rules.contains(key)) return;
         try self.warned_rules.put(self.alloc, key, {});
-        std.debug.print("wing read: schema {s} has rules that wing does not run\n", .{key});
+        readNote(self.global, try std.fmt.allocPrint(self.alloc, "wing read: schema {s} has rules that wing does not run", .{key}));
     }
 };
 
@@ -255,7 +259,7 @@ pub fn run(init: std.process.Init, global: cli.Global, args: []const []const u8)
     };
 
     if (std.Io.File.stdin().isTty(init.io) catch false) {
-        if (!global.quiet) std.debug.print("wing read: reading kite consume --json lines from the terminal (Ctrl-D to finish)\n", .{});
+        if (!global.quiet) readNote(global, "wing read: reading kite consume --json lines from the terminal (Ctrl-D to finish)");
     }
 
     var stdin_buffer: [8192]u8 = undefined;
@@ -699,9 +703,9 @@ fn stripFragment(location: []const u8) []const u8 {
 fn writeOutputLine(output: *std.Io.File.Writer, alloc: std.mem.Allocator, bytes: []const u8, color: bool) !void {
     var rendered = bytes;
     if (color) {
-        if (jv.parse(alloc, bytes)) |document| {
-            rendered = jv.pretty(alloc, document.root, true) catch bytes;
-        } else |_| {}
+        var colored = std.Io.Writer.Allocating.init(alloc);
+        try term.writeJsonColored(&colored.writer, bytes);
+        rendered = colored.written();
     }
     record_io.writeLine(&output.interface, rendered) catch |err| {
         const cause = output.err orelse err;
@@ -732,11 +736,21 @@ fn recordFatal(global: cli.Global, alloc: std.mem.Allocator, line_number: usize,
     if (active_stdout) |output| output.interface.flush() catch {};
     const message = std.fmt.allocPrint(alloc, fmt, args) catch "record processing failed";
     if (global.errors_json) {
-        const full = std.fmt.allocPrint(alloc, "line {d}: {s}", .{ line_number, message }) catch message;
+        const full = std.fmt.allocPrint(alloc, "wing read: line {d}: {s}", .{ line_number, message }) catch message;
         app.fatal(full, true, "read");
     }
     std.debug.print("wing read: line {d}: {s}\n", .{ line_number, message });
     std.process.exit(1);
+}
+
+fn readNote(global: cli.Global, message: []const u8) void {
+    if (global.errors_json) {
+        var output = std.Io.Writer.Allocating.init(std.heap.page_allocator);
+        std.json.Stringify.value(message, .{}, &output.writer) catch {};
+        std.debug.print("{{\"command\":\"read\",\"kind\":\"note\",\"message\":{s}}}\n", .{output.written()});
+    } else {
+        std.debug.print("{s}\n", .{message});
+    }
 }
 
 fn stdoutClosed() bool {

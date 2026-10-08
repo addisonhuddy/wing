@@ -64,7 +64,7 @@ pub fn run(init: std.process.Init, global: cli.Global, args: []const []const u8)
                 const schema = reg.schema(subject, version_text) catch |err| commandError(&reg, err, global, "rm");
                 const id = registry_mod.valueText(init.arena.allocator(), jsonField(schema, "id") orelse .null) catch "?";
                 const guid = textField(schema, "guid") orelse "?";
-                stderr("  {s}@{s} id={s} guid={s}", .{ subject, version_text, id, guid });
+                std.debug.print("wing rm:   {s}@{s} id={s} guid={s}\n", .{ subject, version_text, id, guid });
             }
         }
         const prompt = if (version) |v|
@@ -82,5 +82,5 @@ pub fn run(init: std.process.Init, global: cli.Global, args: []const []const u8)
         const hard = try std.fmt.allocPrint(init.arena.allocator(), "{s}?permanent=true", .{path});
         _ = reg.delete(hard) catch |err| commandError(&reg, err, global, "rm");
     }
-    if (!global.quiet) stderr("deleted {s}", .{subject});
+    if (!global.quiet) std.debug.print("wing rm: deleted {s}\n", .{subject});
 }

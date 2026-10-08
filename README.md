@@ -27,28 +27,80 @@ is designed to compose with [kite](https://github.com/addisonhuddy/kite).
 
 ## Quickstart
 
-Use a reachable Kafka broker and Schema Registry. The local images used for
-development are `apache/kafka-native:latest` and
-`mirror.gcr.io/confluentinc/cp-schema-registry:8.0.0`. The isolated E2E
-harness in `scripts/e2e-docker.sh` shows their private-network configuration.
-This example uses the default local ports and assumes `kite`, `wing`, and
-`jq` are on `PATH`.
+Install wing, then install kite separately if it is not already on `PATH`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/addisonhuddy/wing/main/install.sh | sh
+```
+
+### Run Kafka and Schema Registry locally with Docker
+
+The following single-node setup uses a private Docker network so Schema
+Registry can reach Kafka on its internal listener. It publishes Kafka on
+`localhost:9092` and Schema Registry on `localhost:8081`.
+
+```sh
+docker network create wing-local
+docker run -d --name wing-local-kafka --network wing-local \
+  -p 127.0.0.1:9092:9092 \
+  -e KAFKA_NODE_ID=1 \
+  -e KAFKA_PROCESS_ROLES=broker,controller \
+  -e KAFKA_CONTROLLER_QUORUM_VOTERS=1@wing-local-kafka:9093 \
+  -e KAFKA_CONTROLLER_LISTENER_NAMES=CONTROLLER \
+  -e KAFKA_LISTENERS=INTERNAL://:29092,EXTERNAL://:9092,CONTROLLER://:9093 \
+  -e KAFKA_ADVERTISED_LISTENERS=INTERNAL://wing-local-kafka:29092,EXTERNAL://localhost:9092 \
+  -e KAFKA_LISTENER_SECURITY_PROTOCOL_MAP=INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT \
+  -e KAFKA_INTER_BROKER_LISTENER_NAME=INTERNAL \
+  -e KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR=1 \
+  apache/kafka-native:latest
+docker run -d --name wing-local-sr --network wing-local \
+  -p 127.0.0.1:8081:8081 \
+  -e SCHEMA_REGISTRY_HOST_NAME=wing-local-sr \
+  -e SCHEMA_REGISTRY_LISTENERS=http://0.0.0.0:8081 \
+  -e SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS=PLAINTEXT://wing-local-kafka:29092 \
+  mirror.gcr.io/confluentinc/cp-schema-registry:8.0.0
+until curl -fsS http://localhost:8081/subjects >/dev/null; do sleep 2; done
+```
+
+Set the local endpoints and choose a topic. `wing`, `kite`, and `jq` must be
+available on `PATH`:
 
 ```sh
 export BOOTSTRAP_SERVERS=localhost:9092
 export SCHEMA_REGISTRY_URL=http://localhost:8081
 TOPIC="wing-quickstart-$(date +%s)"
+```
 
-cat examples/orders.schema.json | wing push "$TOPIC"
-printf '%s\n' "{\"topic\":\"$TOPIC\",\"value\":\"{\\\"order_id\\\":1,\\\"customer\\\":\\\"Ada\\\",\\\"total\\\":12.5}\",\"headers\":[]}" |
-  wing write "$TOPIC" | kite produce --json "$TOPIC"
-kite consume --from-beginning --max 1 --idle 3s --json "$TOPIC" |
-  wing read | jq -e '.value.order_id == 1'
+Register the schema, write the sample JSONL records, and read them back:
+
+```sh
+wing push "$TOPIC" < examples/orders.schema.json
+jq -c '{value: .}' examples/orders.jsonl |
+  wing write "$TOPIC" |
+  kite produce --json "$TOPIC"
+kite consume --from-beginning --max 2 --idle 3s --json "$TOPIC" |
+  wing read |
+  jq -c .value
 ```
 
 `wing write` adds a Confluent GUID schema header; `wing read` resolves it,
-validates the value, and emits an inline JSON object. Output can be sent to
-another topic with `kite produce --json`.
+validates each value, and emits an inline JSON object. To fit CSV-produced
+records to the same schema:
+
+```sh
+FIT_TOPIC="${TOPIC}-csv"
+kite produce --csv "$FIT_TOPIC" < examples/orders.csv
+kite consume --from-beginning --max 2 --idle 3s --json "$FIT_TOPIC" |
+  wing write --fit "$TOPIC" |
+  kite produce --json "$TOPIC"
+```
+
+Remove the local containers and network when finished:
+
+```sh
+docker rm -f wing-local-sr wing-local-kafka
+docker network rm wing-local
+```
 
 For source builds, use Zig 0.16.0:
 
@@ -163,6 +215,9 @@ error. Blank lines are skipped.
   prior complete records.
 - `--errors=json` emits machine-readable diagnostic envelopes on stderr.
   Validation locations are plain JSON Pointers; the root pointer is `""`.
+- Per-record read/write errors, notes, and summaries use `wing read:` or
+  `wing write:` prefixes. When a write record has no schema, wing suggests
+  passing a topic or keeping the schema field emitted by `wing read`.
 - `-q` suppresses summaries, not warnings/errors. `-v` prints configuration
   provenance and fit changes. `SIGINT`/`SIGTERM` flush the current record and
   summary, then exit `130`; closing a downstream pipe is quiet.

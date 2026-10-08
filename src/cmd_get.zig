@@ -8,6 +8,7 @@ const header = @import("header.zig");
 const app = @import("app.zig");
 const schema_cache = @import("schema_cache.zig");
 const schema_compile = @import("schema/compile.zig");
+const uri = @import("schema/uri.zig");
 const fatal = app.fatal;
 const writeStdout = app.writeStdout;
 const has = app.has;
@@ -154,7 +155,7 @@ pub fn run(init: std.process.Init, global: cli.Global, args: []const []const u8)
                     .subject = subject,
                 };
                 schema_cache.write(io, alloc, directory, guid, cache_entry) catch |err|
-                    app.stderr("could not write schema cache for GUID '{s}': {s}", .{ guid, @errorName(err) });
+                    std.debug.print("wing get: could not write schema cache for GUID '{s}': {s}\n", .{ guid, @errorName(err) });
             }
         }
     }
@@ -167,7 +168,7 @@ pub fn run(init: std.process.Init, global: cli.Global, args: []const []const u8)
                 else
                     reg.referenceResources(schema, settings.schema_dir) catch |err| commandError(&reg, err, global, "get");
                 bundled_schema = try bundleReferences(alloc, textField(schema, "schema") orelse fatal("registry response has no schema text", global.errors_json, "get"), resources);
-                app.stderr("bundled schema references; the bundled schema has a different GUID", .{});
+                std.debug.print("wing get: bundled schema references; the bundled schema has a different GUID\n", .{});
             }
         }
     }
@@ -196,6 +197,8 @@ fn bundleReferences(
 ) ![]const u8 {
     const parsed = try jv.parse(alloc, schema_text);
     const draft = try schema_compile.selectDraft(parsed.root, .{});
+    const root_plan = try schema_compile.compile(alloc, parsed, .{});
+    const root_base_uri = root_plan.root.base_uri;
     const defs_name: []const u8 = if (draft == .draft2019_09 or draft == .draft2020_12) "$defs" else "definitions";
     var bundled = try std.json.parseFromSliceLeaky(std.json.Value, alloc, schema_text, .{
         .allocate = .alloc_always,
@@ -214,6 +217,15 @@ fn bundleReferences(
         const key = try std.fmt.allocPrint(alloc, "wing_bundle_{d}", .{index});
         try mappings.put(alloc, resource.uri, key);
         try collectAnchors(alloc, resource.uri, resource.document.root, "", &anchors);
+        const resolved_uri = try uri.resolve(alloc, root_base_uri, resource.uri);
+        try mappings.put(alloc, resolved_uri, key);
+        try collectAnchors(alloc, resolved_uri, resource.document.root, "", &anchors);
+        const resource_plan = try schema_compile.compile(alloc, resource.document, .{ .base_uri = resolved_uri });
+        const id_uri = resource_plan.root.base_uri;
+        try mappings.put(alloc, id_uri, key);
+        try collectAnchors(alloc, id_uri, resource.document.root, "", &anchors);
+        if (std.mem.indexOfScalar(u8, id_uri, '#')) |fragment|
+            try mappings.put(alloc, id_uri[0..fragment], key);
         const value = try std.json.parseFromSliceLeaky(std.json.Value, alloc, resource.document.source, .{
             .allocate = .alloc_always,
             .parse_numbers = false,

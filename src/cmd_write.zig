@@ -49,7 +49,7 @@ const Resolver = struct {
         if (at != null and !app.validVersion(version_request, true))
             fatal(self.global, "write", "version must be 'latest' or a positive integer");
         if (self.settings.urls.len == 0)
-            fatal(self.global, "write", "no Schema Registry configured; pass --registry URL, set SCHEMA_REGISTRY_URL, or run wing registry init");
+            fatalLine(self.global, line, "no Schema Registry configured; pass --registry URL, set SCHEMA_REGISTRY_URL, or run wing registry init");
         const subject = try app.subjectForTopic(self.alloc, topic, key);
         const lookup_key = try std.fmt.allocPrint(self.alloc, "{s}:{s}@{s}", .{
             if (key) "key" else "value", subject, version_request,
@@ -60,7 +60,7 @@ const Resolver = struct {
                 fatalFmt(self, "no schema for topic '{s}' (subject {s} not found in {s})", .{
                     topic, subject, app.registryDescription(self.alloc, self.global, self.settings),
                 });
-            app.commandError(&self.registry, err, self.global, "write");
+            fatalLine(self.global, line, self.registry.last_error orelse @errorName(err));
         };
         if (versions != .array or versions.array.items.len == 0)
             fatalFmt(self, "no schema for topic '{s}' (subject {s} not found in {s})", .{
@@ -78,7 +78,7 @@ const Resolver = struct {
         const key_text = try std.fmt.allocPrint(self.alloc, "{s}@{s}", .{ subject, version });
         if (self.schemas.get(key_text)) |found| return found;
         const schema_value = self.registry.schema(subject, version) catch |err|
-            app.commandError(&self.registry, err, self.global, "write");
+            fatalLine(self.global, line, self.registry.last_error orelse @errorName(err));
         const info = try self.makeInfo(schema_value, subject, topic, version, false, line);
         try self.lookups.put(self.alloc, lookup_key, info);
         return info;
@@ -86,7 +86,7 @@ const Resolver = struct {
 
     fn latestKey(self: *Resolver, topic: []const u8, line: usize) !?*Info {
         if (self.settings.urls.len == 0)
-            fatal(self.global, "write", "a REF requires a configured Schema Registry to select its key schema");
+            fatalLine(self.global, line, "a REF requires a configured Schema Registry to select its key schema");
         const subject = try app.subjectForTopic(self.alloc, topic, true);
         const lookup_key = try std.fmt.allocPrint(self.alloc, "key:{s}@latest", .{subject});
         if (self.lookups.get(lookup_key)) |found| return found;
@@ -95,7 +95,7 @@ const Resolver = struct {
                 try self.lookups.put(self.alloc, lookup_key, null);
                 return null;
             }
-            app.commandError(&self.registry, err, self.global, "write");
+            fatalLine(self.global, line, self.registry.last_error orelse @errorName(err));
         };
         if (versions != .array or versions.array.items.len == 0) {
             try self.lookups.put(self.alloc, lookup_key, null);
@@ -108,7 +108,7 @@ const Resolver = struct {
             return found;
         }
         const value = self.registry.schema(subject, version) catch |err|
-            app.commandError(&self.registry, err, self.global, "write");
+            fatalLine(self.global, line, self.registry.last_error orelse @errorName(err));
         const info = try self.makeInfo(value, subject, topic, version, false, line);
         try self.lookups.put(self.alloc, lookup_key, info);
         return info;
@@ -138,16 +138,16 @@ const Resolver = struct {
         }
         if (!cached) {
             if (self.settings.urls.len == 0)
-                fatal(self.global, "write", "no Schema Registry configured; pass --registry URL, set SCHEMA_REGISTRY_URL, or run wing registry init");
+                fatalLine(self.global, line, "no Schema Registry configured; pass --registry URL, set SCHEMA_REGISTRY_URL, or run wing registry init");
             value = self.registry.schemaGuid(guid) catch |err| {
                 if (self.registry.last_status == 404)
                     fatalFmt(self, "schema GUID '{s}' not found in {s}", .{ guid, app.registryDescription(self.alloc, self.global, self.settings) });
-                app.commandError(&self.registry, err, self.global, "write");
+                fatalLine(self.global, line, self.registry.last_error orelse @errorName(err));
             };
             const location = self.registry.guidLocation(guid, key) catch |err| {
                 if (self.registry.last_status == 404)
                     fatalFmt(self, "schema GUID '{s}' not found in {s}", .{ guid, app.registryDescription(self.alloc, self.global, self.settings) });
-                app.commandError(&self.registry, err, self.global, "write");
+                fatalLine(self.global, line, self.registry.last_error orelse @errorName(err));
             };
             subject = location.subject;
             version = location.version;
@@ -171,9 +171,9 @@ const Resolver = struct {
         line: usize,
     ) !*Info {
         const guid = registry_mod.stringValue(registry_mod.objectValue(value, "guid") orelse .null) orelse
-            fatal(self.global, "write", "registry response did not contain a schema GUID");
+            fatalLine(self.global, line, "registry response did not contain a schema GUID");
         const schema_text = registry_mod.stringValue(registry_mod.objectValue(value, "schema") orelse .null) orelse
-            fatal(self.global, "write", "registry response did not contain schema text");
+            fatalLine(self.global, line, "registry response did not contain schema text");
         const document = jv.parse(self.alloc, schema_text) catch
             fatalFmt(self, "registered schema is not valid JSON on line {d}", .{line});
         var resources: []const compile.ResourceSource = &.{};
@@ -184,9 +184,9 @@ const Resolver = struct {
                     fatalFmt(self, "schema references are not available in cache ({s})", .{@errorName(err)});
             } else if (self.settings.urls.len > 0) {
                 resources = self.registry.referenceResources(value, self.settings.schema_dir) catch |err|
-                    app.commandError(&self.registry, err, self.global, "write");
+                    fatalLine(self.global, line, self.registry.last_error orelse @errorName(err));
             } else {
-                fatal(self.global, "write", "schema references require a registry or populated schema cache");
+                fatalLine(self.global, line, "schema references require a registry or populated schema cache");
             }
         }
         const plan = compile.compile(self.alloc, document, .{ .default_draft = .draft07, .extra_resources = resources }) catch |err|
@@ -198,7 +198,11 @@ const Resolver = struct {
         try self.schemas.put(self.alloc, try std.fmt.allocPrint(self.alloc, "{s}@{s}", .{ subject, version }), info);
         try self.schemas.put(self.alloc, try std.fmt.allocPrint(self.alloc, "guid:{s}", .{guid}), info);
         if (!cached and self.settings.schema_dir != null) self.cacheInfo(info) catch |err|
-            if (!self.global.quiet) app.stderr("could not write schema cache for GUID '{s}': {s}", .{ guid, @errorName(err) });
+            if (!self.global.quiet) writeNote(self.global, app.allocPrint(
+                self.alloc,
+                "wing write: could not write schema cache for GUID '{s}': {s}",
+                .{ guid, @errorName(err) },
+            ));
         return info;
     }
 
@@ -259,7 +263,7 @@ pub fn run(init: std.process.Init, global: cli.Global, args: []const []const u8)
     installSignalHandlers();
     const color = !check and (std.Io.File.stdout().isTty(init.io) catch false) and term.colorEnabled(init.io, init.environ_map);
     if ((std.Io.File.stdin().isTty(init.io) catch false) and !global.quiet)
-        app.stderr("reading JSON record lines from the terminal (Ctrl-D to finish)", .{});
+        writeNote(global, "wing write: reading JSON record lines from the terminal (Ctrl-D to finish)");
     var record_arena = std.heap.ArenaAllocator.init(alloc);
     defer record_arena.deinit();
     var line_number: usize = 0;
@@ -394,7 +398,7 @@ pub fn run(init: std.process.Init, global: cli.Global, args: []const []const u8)
 fn selectValue(resolver: *Resolver, reference: ?[]const u8, input: record.Record, line: usize) !*Info {
     if (reference) |ref| return resolver.resolve(ref, false, line);
     const schema_node = record.field(input.document.root, "schema") orelse
-        fatalLine(resolver.global, line, "missing schema; pass a REF or provide schema.value.guid");
+        fatalLine(resolver.global, line, "no schema for this record; pass a topic (wing write TOPIC) or keep the schema field from wing read");
     const value_schema = record.field(schema_node, "value") orelse
         fatalLine(resolver.global, line, "missing schema.value.guid; pass a REF");
     const guid = record.field(value_schema, "guid") orelse
@@ -578,17 +582,8 @@ fn noteSelection(
             std.fmt.allocPrint(alloc, "using {s} version {s}, no key schema", .{
                 value.subject, value.version,
             }) catch "using schema";
-        if (global.errors_json) {
-            emitNoteJson(selection);
-            return;
-        }
-        if (key) |info| {
-            app.stderr("using {s} version {s}, {s} version {s}", .{ value.subject, value.version, info.subject, info.version });
-        } else if (missing_key_subject) |subject| {
-            app.stderr("using {s} version {s}, no {s} subject", .{ value.subject, value.version, subject });
-        } else {
-            app.stderr("using {s} version {s}, no key schema", .{ value.subject, value.version });
-        }
+        const prefixed = std.fmt.allocPrint(alloc, "wing write: {s}", .{selection}) catch selection;
+        if (global.errors_json) emitNoteJson(prefixed) else std.debug.print("{s}\n", .{prefixed});
     }
 }
 
@@ -596,6 +591,14 @@ fn emitNoteJson(message: []const u8) void {
     var output = std.Io.Writer.Allocating.init(std.heap.page_allocator);
     std.json.Stringify.value(message, .{}, &output.writer) catch {};
     std.debug.print("{{\"command\":\"write\",\"kind\":\"note\",\"message\":{s}}}\n", .{output.written()});
+}
+
+fn writeNote(global: cli.Global, message: []const u8) void {
+    if (global.errors_json) {
+        emitNoteJson(message);
+    } else {
+        std.debug.print("{s}\n", .{message});
+    }
 }
 
 fn warnRuleSet(
@@ -615,11 +618,11 @@ fn warnRuleSet(
     }
     if (!active or reported.contains(info.guid)) return;
     try reported.put(alloc, info.guid, {});
-    const message = try std.fmt.allocPrint(alloc, "schema {s} has rules that wing does not run", .{info.guid});
+    const message = try std.fmt.allocPrint(alloc, "wing write: schema {s} has rules that wing does not run", .{info.guid});
     if (global.errors_json) {
         emitNoteJson(message);
     } else {
-        std.debug.print("wing write: {s}\n", .{message});
+        std.debug.print("{s}\n", .{message});
     }
 }
 
@@ -721,9 +724,9 @@ fn printDropNotes(dropped: std.StringHashMapUnmanaged(usize), global: cli.Global
     var iterator = dropped.iterator();
     while (iterator.next()) |entry| {
         if (global.errors_json) {
-            emitNoteJson(std.fmt.allocPrint(std.heap.page_allocator, "drop-extra removed {s} from {d} records", .{
+            emitNoteJson(std.fmt.allocPrint(std.heap.page_allocator, "wing write: drop-extra removed {s} from {d} records", .{
                 entry.key_ptr.*, entry.value_ptr.*,
-            }) catch "drop-extra removed records");
+            }) catch "wing write: drop-extra removed records");
         } else {
             std.debug.print("wing write: drop-extra removed {s} from {d} records\n", .{ entry.key_ptr.*, entry.value_ptr.* });
         }
@@ -813,9 +816,9 @@ fn writeLine(
 ) !void {
     var rendered = bytes;
     if (color) {
-        if (jv.parse(alloc, bytes)) |document| {
-            rendered = jv.pretty(alloc, document.root, true) catch bytes;
-        } else |_| {}
+        var colored = std.Io.Writer.Allocating.init(alloc);
+        try term.writeJsonColored(&colored.writer, bytes);
+        rendered = colored.written();
     }
     record_io.writeLine(&output.interface, rendered) catch |err| {
         const cause = output.err orelse err;
@@ -835,11 +838,19 @@ fn fatal(global: cli.Global, command: []const u8, message: []const u8) noreturn 
 }
 
 fn fatalFmt(resolver: *Resolver, comptime fmt: []const u8, args: anytype) noreturn {
-    app.fatal(std.fmt.allocPrint(resolver.alloc, fmt, args) catch "write failed", resolver.global.errors_json, "write");
+    const message = std.fmt.allocPrint(resolver.alloc, "wing write: {s}", .{
+        std.fmt.allocPrint(resolver.alloc, fmt, args) catch "write failed",
+    }) catch "wing write: write failed";
+    if (resolver.global.errors_json) app.fatal(message, true, "write");
+    std.debug.print("{s}\n", .{message});
+    std.process.exit(1);
 }
 
 fn fatalLine(global: cli.Global, line: usize, message: []const u8) noreturn {
-    app.fatal(std.fmt.allocPrint(std.heap.page_allocator, "line {d}: {s}", .{ line, message }) catch message, global.errors_json, "write");
+    const full = std.fmt.allocPrint(std.heap.page_allocator, "wing write: line {d}: {s}", .{ line, message }) catch message;
+    if (global.errors_json) app.fatal(full, true, "write");
+    std.debug.print("{s}\n", .{full});
+    std.process.exit(1);
 }
 
 fn stdoutClosed() bool {

@@ -6,6 +6,7 @@ const schema_compile = @import("schema/compile.zig");
 const metaschemas = @import("schema/metaschemas.zig");
 const validator = @import("schema/validate.zig");
 const jv = @import("jv.zig");
+const CompatibilityError = struct { type: []const u8, path: []const u8, description: []const u8 };
 
 const Options = struct {
     topic: ?[]const u8 = null,
@@ -48,10 +49,17 @@ pub fn run(init: std.process.Init, global: cli.Global, args: []const []const u8)
     }
     if (options.compatibility != null and options.check)
         app.fatal("--compat cannot be combined with --check", global.errors_json, "push");
+    if (options.topic == null and !options.check) {
+        if (global.errors_json)
+            app.fatal("push needs a TOPIC (use 'wing push --check' to lint offline)", true, "push");
+        std.debug.print("wing: push needs a TOPIC (use 'wing push --check' to lint offline)\nTry 'wing --help'\n", .{});
+        std.process.exit(1);
+    }
 
     var stdin_buffer: [8192]u8 = undefined;
     var stdin = std.Io.File.stdin().reader(init.io, &stdin_buffer);
     const source = try stdin.interface.allocRemaining(alloc, .limited(16 * 1024 * 1024));
+    if (source.len == 0) app.fatal("no schema on stdin", global.errors_json, "push");
     var envelope: ?std.json.Value = null;
     const schema_text = if (options.meta) blk: {
         envelope = std.json.parseFromSliceLeaky(std.json.Value, alloc, source, .{
@@ -103,10 +111,7 @@ pub fn run(init: std.process.Init, global: cli.Global, args: []const []const u8)
         lint_failed = (try checkFixtures(init, alloc, directory, &plan)) or lint_failed;
     if (lint_failed) std.process.exit(2);
 
-    if (options.topic == null) {
-        if (!options.check) app.fatal("missing TOPIC (or use --check for offline lint)", global.errors_json, "push");
-        return;
-    }
+    if (options.topic == null) return;
     if (settings.urls.len == 0)
         app.fatal("no Schema Registry configured; pass --registry URL, set SCHEMA_REGISTRY_URL, or run wing registry init", global.errors_json, "push");
     const subject = try app.subjectForTopic(alloc, options.topic.?, options.key);
@@ -118,7 +123,8 @@ pub fn run(init: std.process.Init, global: cli.Global, args: []const []const u8)
         try setCompatibility(alloc, &reg, escaped, level)
     else
         CompatState{};
-    if (!try compatibilityCheck(alloc, &reg, escaped, payload)) {
+    const compatibility_level = if (options.compatibility) |level| level else reg.compat(subject) catch "BACKWARD";
+    if (!try compatibilityCheck(alloc, &reg, escaped, subject, payload, compatibility_level, global)) {
         if (options.compatibility != null) restoreCompatibility(&reg, escaped, compat_override);
         std.process.exit(2);
     }
@@ -193,8 +199,16 @@ fn restoreCompatibility(reg: *registry_mod.Registry, subject: []const u8, state:
     }
 }
 
-fn compatibilityCheck(alloc: std.mem.Allocator, reg: *registry_mod.Registry, subject: []const u8, payload: []const u8) !bool {
-    const path = try std.fmt.allocPrint(alloc, "/compatibility/subjects/{s}/versions/latest?verbose=true", .{subject});
+fn compatibilityCheck(
+    alloc: std.mem.Allocator,
+    reg: *registry_mod.Registry,
+    escaped_subject: []const u8,
+    subject: []const u8,
+    payload: []const u8,
+    compatibility: []const u8,
+    global: cli.Global,
+) !bool {
+    const path = try std.fmt.allocPrint(alloc, "/compatibility/subjects/{s}/versions/latest?verbose=true", .{escaped_subject});
     const body = reg.post(path, payload) catch |err| {
         if (reg.last_status == 404) return true;
         app.commandError(reg, err, .{}, "push");
@@ -202,14 +216,122 @@ fn compatibilityCheck(alloc: std.mem.Allocator, reg: *registry_mod.Registry, sub
     const response = std.json.parseFromSliceLeaky(std.json.Value, alloc, body, .{ .allocate = .alloc_always }) catch return error.InvalidResponse;
     const compatible = registry_mod.objectValue(response, "is_compatible");
     if (compatible == null or compatible.? != .bool or compatible.?.bool) return true;
-    if (registry_mod.objectValue(response, "messages")) |messages| {
-        if (messages == .array) for (messages.array.items) |message| {
-            pushStderr("{s}", .{registry_mod.stringValue(message) orelse "incompatible schema"});
-        };
+    const messages = registry_mod.objectValue(response, "messages");
+    const message_count = if (messages) |value| if (value == .array) value.array.items.len else 0 else 0;
+    const count = if (message_count > 0) message_count else @intFromBool(registry_mod.objectValue(response, "message") != null);
+    var errors = try alloc.alloc(CompatibilityError, count);
+    var raw_messages = try alloc.alloc([]const u8, count);
+    var error_count: usize = 0;
+    var raw_count: usize = 0;
+    if (message_count > 0) {
+        for (messages.?.array.items) |message| {
+            const raw = registry_mod.stringValue(message) orelse continue;
+            if (parseCompatibilityMessage(raw)) |parsed| {
+                errors[error_count] = parsed;
+                error_count += 1;
+            } else if (global.verbose or !isVerboseMetadata(raw)) {
+                raw_messages[raw_count] = raw;
+                raw_count += 1;
+                if (global.errors_json) {
+                    errors[error_count] = .{ .type = "UNKNOWN", .path = "", .description = raw };
+                    error_count += 1;
+                }
+            }
+        }
+    } else if (registry_mod.objectValue(response, "message")) |message| {
+        const raw = registry_mod.stringValue(message) orelse "incompatible schema";
+        if (parseCompatibilityMessage(raw)) |parsed| {
+            errors[error_count] = parsed;
+            error_count += 1;
+        } else if (global.errors_json) {
+            errors[error_count] = .{ .type = "UNKNOWN", .path = "", .description = raw };
+            error_count += 1;
+        } else {
+            raw_messages[raw_count] = raw;
+            raw_count += 1;
+        }
     }
-    if (registry_mod.objectValue(response, "message")) |message|
-        pushStderr("{s}", .{registry_mod.stringValue(message) orelse "incompatible schema"});
+    const versions = reg.versions(subject) catch null;
+    const version = if (versions) |value|
+        if (value == .array and value.array.items.len > 0) app.latestVersion(alloc, value) else "latest"
+    else
+        "latest";
+    if (global.errors_json) {
+        var output = std.Io.Writer.Allocating.init(alloc);
+        try std.json.Stringify.value(.{
+            .kind = "incompatible",
+            .subject = subject,
+            .version = version,
+            .compatibility = compatibility,
+            .errors = errors[0..error_count],
+        }, .{}, &output.writer);
+        std.debug.print("{s}\n", .{output.written()});
+    } else {
+        pushStderr("not compatible with {s} version {s} ({s}):", .{ subject, version, compatibility });
+        for (errors[0..error_count]) |item|
+            if (item.type.len > 0)
+                pushStderr("  {s} at {s}: {s}", .{ item.type, item.path, item.description });
+        for (raw_messages[0..raw_count]) |raw| pushStderr("{s}", .{raw});
+    }
     return false;
+}
+
+fn parseCompatibilityMessage(message: []const u8) ?CompatibilityError {
+    const kind = pseudoField(message, "errorType") orelse return null;
+    var description = pseudoField(message, "description") orelse return null;
+    if (description.len > 0 and description[description.len - 1] == '\'')
+        description = description[0 .. description.len - 1];
+    var path: []const u8 = "";
+    if (std.mem.indexOf(u8, description, "path '")) |start| {
+        const from = start + "path '".len;
+        if (std.mem.indexOfScalarPos(u8, description, from, '\'')) |end|
+            path = description[from..end];
+    }
+    if (std.mem.startsWith(u8, path, "#")) path = path[1..];
+    return .{ .type = kind, .path = path, .description = description };
+}
+
+fn pseudoField(message: []const u8, name: []const u8) ?[]const u8 {
+    const at = std.mem.indexOf(u8, message, name) orelse return null;
+    const colon = std.mem.indexOfScalarPos(u8, message, at + name.len, ':') orelse return null;
+    var start = colon + 1;
+    while (start < message.len and std.ascii.isWhitespace(message[start])) start += 1;
+    if (start == message.len) return null;
+    const quote = if (message[start] == '"' or message[start] == '\'') message[start] else 0;
+    if (quote != 0) {
+        start += 1;
+        var end = start;
+        while (end < message.len) : (end += 1) {
+            if (message[end] == '\\') {
+                end += 1;
+                continue;
+            }
+            if (message[end] == quote) return message[start..end];
+            if (message[end] == '}') return std.mem.trimEnd(u8, message[start..end], " \t\r\n");
+        }
+        return null;
+    }
+    var end = start;
+    while (end < message.len and message[end] != ',' and message[end] != '}') : (end += 1) {}
+    return std.mem.trim(u8, message[start..end], " \t\r\n");
+}
+
+test "parses Schema Registry compatibility pseudo JSON with a trailing apostrophe" {
+    const parsed = parseCompatibilityMessage(
+        "{errorType:\"TYPE_CHANGED\", description:\"A type at path '#/properties/order_id' is different between the new schema and the old schema'}",
+    ).?;
+    try std.testing.expectEqualStrings("TYPE_CHANGED", parsed.type);
+    try std.testing.expectEqualStrings("/properties/order_id", parsed.path);
+    try std.testing.expectEqualStrings(
+        "A type at path '#/properties/order_id' is different between the new schema and the old schema",
+        parsed.description,
+    );
+}
+
+fn isVerboseMetadata(message: []const u8) bool {
+    return std.mem.indexOf(u8, message, "oldSchema") != null or
+        std.mem.indexOf(u8, message, "validateFields") != null or
+        std.mem.indexOf(u8, message, "compatibility") != null;
 }
 
 fn requestValue(

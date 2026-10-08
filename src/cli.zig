@@ -55,6 +55,30 @@ fn suggestion(name: []const u8) ?[]const u8 {
 }
 
 pub fn optionError(alloc: std.mem.Allocator, arg: []const u8) []const u8 {
+    return optionErrorFor(alloc, arg, &options);
+}
+
+pub fn optionErrorFor(alloc: std.mem.Allocator, arg: []const u8, valid_options: []const []const u8) []const u8 {
+    const opt = if (std.mem.indexOfScalar(u8, arg, '=')) |at| arg[0..at] else arg;
+    var best: ?[]const u8 = null;
+    var best_dist: usize = 3;
+    var tie = false;
+    for (valid_options) |candidate| {
+        const candidate_dist = distance(opt, candidate);
+        if (candidate_dist < best_dist) {
+            best = candidate;
+            best_dist = candidate_dist;
+            tie = false;
+        } else if (candidate_dist == best_dist) {
+            tie = true;
+        }
+    }
+    if (best_dist <= 2 and !tie)
+        return std.fmt.allocPrint(alloc, "unknown option '{s}' (did you mean '{s}'?)", .{ arg, best.? }) catch "out of memory";
+    return std.fmt.allocPrint(alloc, "unknown option '{s}'", .{arg}) catch "out of memory";
+}
+
+fn globalOptionError(alloc: std.mem.Allocator, arg: []const u8) []const u8 {
     const opt = if (std.mem.indexOfScalar(u8, arg, '=')) |at| arg[0..at] else arg;
     if (suggestion(opt)) |candidate|
         return std.fmt.allocPrint(alloc, "unknown option '{s}' (did you mean '{s}'?)", .{ arg, candidate }) catch "out of memory";

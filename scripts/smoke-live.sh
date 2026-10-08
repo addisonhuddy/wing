@@ -32,6 +32,8 @@ DLQ="$PREFIX-dlq"
 REF_BASE="$PREFIX-ref-base"
 REF_ROOT="$PREFIX-ref-root"
 REF_COPY="$PREFIX-ref-copy"
+REF_MONEY="$PREFIX-ref-money"
+REF_INVOICE="$PREFIX-ref-invoices"
 SCHEMA='{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"id":{"type":"integer"},"name":{"type":"string"}},"required":["id"],"additionalProperties":false}'
 KEY_SCHEMA='{"type":"object","properties":{"id":{"type":"integer"}},"required":["id"],"additionalProperties":false}'
 printf '%s\n' "$SCHEMA" >"$TMP/orders.schema.json"
@@ -111,6 +113,20 @@ invalid_status=$?
 set -e
 [ "$invalid_status" -eq 2 ]
 
+echo "relative Confluent reference without root \$id"
+RELATIVE_MONEY='{"$schema":"http://json-schema.org/draft-07/schema#","$id":"money.json","type":"object","properties":{"amount":{"type":"number"}},"required":["amount"]}'
+RELATIVE_INVOICE='{"$schema":"http://json-schema.org/draft-07/schema#","type":"object","properties":{"price":{"$ref":"money.json#/properties/amount"}},"required":["price"]}'
+printf '%s\n' "$RELATIVE_MONEY" | "$WING" push "$REF_MONEY" >/dev/null
+RELATIVE_ENVELOPE=$(jq -cn --arg topic "$REF_INVOICE" --arg schema "$RELATIVE_INVOICE" --arg subject "${REF_MONEY}-value" \
+    '{topic:$topic,version:1,id:1,guid:"00000000-0000-0000-0000-000000000000",compat:"BACKWARD",schema:$schema,references:[{name:"money.json",subject:$subject,version:1}],metadata:null,ruleSet:null}')
+printf '%s\n' "$RELATIVE_ENVELOPE" | "$WING" push "$REF_INVOICE" --meta >/dev/null
+printf '%s\n' '{"topic":"'"$REF_INVOICE"'","value":"{\"price\":12}","headers":[]}' |
+    "$WING" write "$REF_INVOICE" | "$KITE" produce --json "$REF_INVOICE"
+"$KITE" consume --from-beginning --max 1 --idle 2s --json "$REF_INVOICE" |
+    "$WING" read | jq -e '.value.price == 12' >/dev/null
+"$WING" get "$REF_INVOICE" >"$TMP/relative-bundled.schema.json"
+printf '%s\n' '{"price":12}' | "$WING" _validate "$TMP/relative-bundled.schema.json" | grep -qx valid
+
 echo "empty values and early close"
 printf '%s\n' '{"topic":"'"$ORDERS"'","value":"","headers":[]}' |
     "$WING" write "$ORDERS" | "$KITE" produce --json "$ORDERS"
@@ -132,12 +148,31 @@ printf '%s\n' "$SCHEMA" | "$WING" push "$ORDERS" --fixtures "$TMP/fixtures" --ch
 fixture_status=$?
 set -e
 [ "$fixture_status" -eq 2 ]
+BREAKING_SCHEMA='{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"id":{"type":"string"},"name":{"type":"string"}},"required":["id"],"additionalProperties":false}'
 set +e
-printf '%s\n' '{"type":"string"}' | "$WING" push "$ORDERS" --compat BACKWARD >/dev/null
+printf '%s\n' "$BREAKING_SCHEMA" | "$WING" push "$ORDERS" --compat BACKWARD >/dev/null 2>"$TMP/compat.err"
 compat_status=$?
 set -e
 [ "$compat_status" -eq 2 ]
+grep -Fq "wing push: not compatible with ${ORDERS}-value version 1 (BACKWARD):" "$TMP/compat.err"
+grep -Fq "TYPE_CHANGED at /properties/id:" "$TMP/compat.err"
 curl -sS -o /dev/null -w '%{http_code}\n' "$SR/config/${ORDERS}-value" | grep -qx 404
+set +e
+printf '%s\n' "$BREAKING_SCHEMA" | "$WING" --errors=json push "$ORDERS" >/dev/null 2>"$TMP/compat.json"
+compat_json_status=$?
+set -e
+[ "$compat_json_status" -eq 2 ]
+python3 - "$TMP/compat.json" "$ORDERS" <<'PY'
+import json
+import sys
+with open(sys.argv[1]) as source:
+    result = json.loads(source.readline())
+assert result["kind"] == "incompatible"
+assert result["subject"] == sys.argv[2] + "-value"
+assert result["compatibility"] == "BACKWARD"
+assert result["errors"] and result["errors"][0]["type"] == "TYPE_CHANGED"
+assert result["errors"][0]["path"] == "/properties/id"
+PY
 set +e
 {
     "$KITE" consume --from-beginning --max 1 --idle 2s --json "$ORDERS"
