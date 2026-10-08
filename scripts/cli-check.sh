@@ -477,6 +477,10 @@ run_read_input_case write-fit-drop-quiet 2 identical "drop-extra removed /extra 
 run_read_input_case write-key-offline-cache 2 identical "keys are validated because offline-key exists" \
     '{"key":"\"bad\"","value":"{}","schema":{"value":{"guid":"11111111-1111-1111-1111-111111111111"},"key":{"guid":"44444444-4444-4444-4444-444444444444"}}}' \
     --workdir "$TMP/cache-work" --schema-dir "$TMP/schema-cache" write --check
+run_read_input_case write-bare-scalar 1 empty "expected a JSON object per line" \
+    '42' --workdir "$TMP/cache-work" --schema-dir "$TMP/schema-cache" write 22222222-2222-2222-2222-222222222222
+run_read_input_case write-bare-without-ref 1 empty "pass a topic to write bare JSON values" \
+    '{"x":1}' write
 run_read_input_case write-missing-schema 1 empty \
     "wing write: line 1: no schema for this record; pass a topic (wing write TOPIC) or keep the schema field from wing read" \
     '{"value":"{}"}' write

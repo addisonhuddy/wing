@@ -313,8 +313,15 @@ pub fn run(init: std.process.Init, global: cli.Global, args: []const []const u8)
         read_count += 1;
         _ = record_arena.reset(.retain_capacity);
         const line_alloc = record_arena.allocator();
-        const input_record = record.Record.parse(line_alloc, line) catch
-            fatalLine(global, line_number, "expected a JSON record; did you mean 'kite consume --json'?");
+        const input_record = record.Record.parse(line_alloc, line) catch |err| blk: {
+            if (reference != null and err == error.InvalidRecord) {
+                if (try bareValueRecord(line_alloc, line)) |wrapped| break :blk wrapped;
+            }
+            fatalLine(global, line_number, if (reference == null)
+                "expected a kite JSON record ({\"value\": ...}); pass a topic to write bare JSON values"
+            else
+                "expected a JSON object per line, or a kite JSON record ({\"value\": ...})");
+        };
         if (input_record.value_b64_bytes != null)
             fatalLine(global, line_number, "value_b64 is not supported by wing write; values must be JSON");
 
@@ -429,6 +436,21 @@ pub fn run(init: std.process.Init, global: cli.Global, args: []const []const u8)
     printDropNotes(dropped, global);
     printSummary(global, read_count, passed, failed, empty, written, fitted, fit_enabled, rule_counts);
     std.process.exit(if (interrupted.load(.acquire)) 130 else if (failed > 0 or (check and check_changes > 0)) 2 else 0);
+}
+
+/// With a REF, a JSON object or array line without `value`/`value_b64` is the
+/// record value itself; it is wrapped in a kite envelope.
+fn bareValueRecord(alloc: std.mem.Allocator, line: []const u8) !?record.Record {
+    const document = jv.parse(alloc, line) catch return null;
+    switch (document.root.value) {
+        .object => if (record.field(document.root, "value") != null or record.field(document.root, "value_b64") != null)
+            return null,
+        .array => {},
+        else => return null,
+    }
+    const trimmed = jv.sourceSlice(document, document.root);
+    const wrapped = try std.mem.concat(alloc, u8, &.{ "{\"value\":", trimmed, "}" });
+    return record.Record.parse(alloc, wrapped) catch null;
 }
 
 fn selectValue(resolver: *Resolver, reference: ?[]const u8, input: record.Record, line: usize) !*Info {
@@ -948,4 +970,18 @@ fn installSignalHandlers() void {
     std.posix.sigaction(.TERM, &stop, null);
     const ignore: std.posix.Sigaction = .{ .handler = .{ .handler = std.posix.SIG.IGN }, .mask = std.posix.sigemptyset(), .flags = 0 };
     std.posix.sigaction(.PIPE, &ignore, null);
+}
+
+test "bare JSON lines become the record value; envelopes and scalars do not" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const object = (try bareValueRecord(alloc, " {\"id\":1} ")).?;
+    try std.testing.expectEqualStrings("{\"id\":1}", jv.sourceSlice(object.document, object.value));
+    const array = (try bareValueRecord(alloc, "[1,2]")).?;
+    try std.testing.expectEqualStrings("[1,2]", jv.sourceSlice(array.document, array.value));
+    try std.testing.expect((try bareValueRecord(alloc, "{\"value\":{\"id\":1}}")) == null);
+    try std.testing.expect((try bareValueRecord(alloc, "{\"value_b64\":\"AA==\"}")) == null);
+    try std.testing.expect((try bareValueRecord(alloc, "42")) == null);
+    try std.testing.expect((try bareValueRecord(alloc, "{not json")) == null);
 }

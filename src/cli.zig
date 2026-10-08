@@ -262,6 +262,8 @@ pub fn help(command: []const u8) []const u8 {
         \\Usage: wing write [REF] [OPTIONS] [@NAME]
         \\
         \\Validate JSON records and prepare them for kite produce.
+        \\Input is kite JSON records ({"value": ...}). With a REF, a JSON object
+        \\line without a "value" member is taken as the record value.
         \\Pin a version with TOPIC:VERSION; use @NAME only for registry selection.
         \\
         \\Options:
@@ -269,8 +271,9 @@ pub fn help(command: []const u8) []const u8 {
         \\  --check               Validate without adding a header.
         \\
         \\Examples:
-        \\  wing write orders --fit
-        \\  wing write orders:latest | kite produce --json orders
+        \\  wing write orders < orders.jsonl | kite produce --json orders
+        \\  wing write orders --fit < orders.jsonl
+        \\  kite consume --json raw | wing write orders:latest --fit
         \\
     ;
     if (std.mem.eql(u8, command, "push"))
@@ -327,7 +330,8 @@ pub fn help(command: []const u8) []const u8 {
     \\  -q, -v, -h, -V        Quiet, verbose, help, version.
     \\
     \\Examples:
-    \\  kite consume --json orders | wing read | jq '.id' |
+    \\  wing write orders < orders.jsonl | kite produce --json orders
+    \\  kite consume --json orders | wing read | jq -c '.value.total += 1' |
     \\    wing write --fit | kite produce --json orders
     \\  wing ls orders
     \\  wing get orders:latest

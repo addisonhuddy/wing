@@ -56,9 +56,7 @@ curl -fsSL https://raw.githubusercontent.com/addisonhuddy/kite/main/install.sh |
 export BOOTSTRAP_SERVERS=localhost:9092
 export SCHEMA_REGISTRY_URL=http://localhost:8081
 wing push orders < examples/orders.schema.json
-jq -c '{value: .}' examples/orders.jsonl |
-  wing write orders |
-  kite produce --json orders
+wing write orders < examples/orders.jsonl | kite produce --json orders
 kite consume --from-beginning --max 2 --idle 3s --json orders |
   wing read |
   jq -c .value
@@ -321,7 +319,11 @@ subjects; a final positive integer after `:` pins a version.
 
 `read` accepts kite `--json`: one JSON object per line, with `value` or
 `value_b64` and optional `topic`, `partition`, `offset`, `timestamp`, `key`,
-`headers`, and `schema`. `write` requires a JSON `value`. Blank lines are
+`headers`, and `schema`. `write` requires a JSON `value`; when a REF is
+given, a JSON object or array line without a `value` (or `value_b64`) member
+is taken as the record value and written in a kite envelope. A line whose
+object has a `value` member is always read as an envelope, so wrap values of
+schemas with a top-level `value` property as `{"value": ...}`. Blank lines are
 skipped.
 
 - A JSON string in `value` is the exact record byte sequence. An object or
