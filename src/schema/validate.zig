@@ -23,7 +23,50 @@ const Context = struct {
     evaluations: std.ArrayListUnmanaged(Evaluation) = .empty,
     ref_stack: []const RefVisit = &.{},
 };
-const RefVisit = struct { node: *const compile_mod.Node, instance_path: []const u8 };
+const RefVisit = struct { node: *const compile_mod.Node, instance_path: *const InstancePath };
+const PathToken = union(enum) { key: []const u8, index: usize };
+const InstancePath = struct {
+    parent: ?*const InstancePath = null,
+    token: ?PathToken = null,
+
+    fn render(self: *const InstancePath, alloc: std.mem.Allocator) ![]const u8 {
+        var segments: [256]PathToken = undefined;
+        var count: usize = 0;
+        var current: ?*const InstancePath = self;
+        while (current) |part| {
+            if (part.token) |token| {
+                if (count == segments.len) return error.PathTooDeep;
+                segments[count] = token;
+                count += 1;
+            }
+            current = part.parent;
+        }
+
+        var result: std.ArrayListUnmanaged(u8) = .empty;
+        try result.append(alloc, '#');
+        while (count > 0) {
+            count -= 1;
+            try result.append(alloc, '/');
+            switch (segments[count]) {
+                .key => |key| for (key) |byte| {
+                    if (byte == '~') {
+                        try result.appendSlice(alloc, "~0");
+                    } else if (byte == '/') {
+                        try result.appendSlice(alloc, "~1");
+                    } else {
+                        try result.append(alloc, byte);
+                    }
+                },
+                .index => |index| {
+                    var index_buffer: [20]u8 = undefined;
+                    const index_text = try std.fmt.bufPrint(&index_buffer, "{d}", .{index});
+                    try result.appendSlice(alloc, index_text);
+                },
+            }
+        }
+        return result.toOwnedSlice(alloc);
+    }
+};
 const Evaluation = union(enum) {
     property: struct { path: []const u8, name: []const u8 },
     item: struct { path: []const u8, index: usize },
@@ -36,11 +79,12 @@ pub fn validate(
     options: Options,
 ) ![]Failure {
     var context: Context = .{ .alloc = alloc, .plan = plan, .verbose = options.verbose };
-    try visit(&context, plan.root, instance, "#");
+    const root_path = InstancePath{};
+    try visit(&context, plan.root, instance, &root_path);
     return context.errors.toOwnedSlice(alloc);
 }
 
-fn visit(ctx: *Context, schema: *const compile_mod.Node, instance: *const jv.Node, instance_path: []const u8) anyerror!void {
+fn visit(ctx: *Context, schema: *const compile_mod.Node, instance: *const jv.Node, instance_path: *const InstancePath) anyerror!void {
     if (ctx.depth >= 256) {
         try fail(ctx, schema, "maximum validation depth exceeded", instance_path, "schema");
         return;
@@ -48,48 +92,52 @@ fn visit(ctx: *Context, schema: *const compile_mod.Node, instance: *const jv.Nod
     ctx.depth += 1;
     defer ctx.depth -= 1;
     const previous_scope = ctx.dynamic_scope;
-    const resource_uri = resourceUri(schema.base_uri);
-    if (ctx.dynamic_scope.len == 0 or !compile_mod.sameSchemaUri(ctx.dynamic_scope[ctx.dynamic_scope.len - 1], resource_uri))
-        ctx.dynamic_scope = try appendDynamicResource(ctx.alloc, ctx.dynamic_scope, resource_uri);
+    if (ctx.plan.uses_dynamic_refs) {
+        const resource_uri = resourceUri(schema.base_uri);
+        if (ctx.dynamic_scope.len == 0 or !compile_mod.sameSchemaUri(ctx.dynamic_scope[ctx.dynamic_scope.len - 1], resource_uri))
+            ctx.dynamic_scope = try appendDynamicResource(ctx.alloc, ctx.dynamic_scope, resource_uri);
+    }
     defer ctx.dynamic_scope = previous_scope;
     if (schema.schema.value == .boolean) {
         if (!schema.schema.value.boolean) try fail(ctx, schema, "boolean schema is false", instance_path, "false");
         return;
     }
 
-    for ([_][]const u8{ "$ref", "$dynamicRef", "$recursiveRef" }) |reference_keyword| {
-        const reference = schema.keyword(reference_keyword) orelse continue;
-        if (reference.value == .string) {
-            var target: *const compile_mod.Node = compile_mod.resolveReference(ctx.alloc, ctx.plan, schema, reference.value.string) catch {
-                try fail(ctx, schema, "reference could not be resolved", instance_path, reference_keyword);
-                return;
-            };
-            if (std.mem.eql(u8, reference_keyword, "$dynamicRef")) {
-                if (referenceAnchor(ctx, reference.value.string)) |name| {
-                    if (schemaAnchorName(target, "$dynamicAnchor")) |target_name| {
-                        if (std.mem.eql(u8, name, target_name)) {
-                            if (dynamicTarget(ctx, name)) |dynamic| target = dynamic;
+    if (schema.has_references) {
+        for ([_][]const u8{ "$ref", "$dynamicRef", "$recursiveRef" }) |reference_keyword| {
+            const reference = schema.keyword(reference_keyword) orelse continue;
+            if (reference.value == .string) {
+                var target: *const compile_mod.Node = compile_mod.resolveReference(ctx.alloc, ctx.plan, schema, reference.value.string) catch {
+                    try fail(ctx, schema, "reference could not be resolved", instance_path, reference_keyword);
+                    return;
+                };
+                if (std.mem.eql(u8, reference_keyword, "$dynamicRef")) {
+                    if (referenceAnchor(ctx, reference.value.string)) |name| {
+                        if (schemaAnchorName(target, "$dynamicAnchor")) |target_name| {
+                            if (std.mem.eql(u8, name, target_name)) {
+                                if (dynamicTarget(ctx, name)) |dynamic| target = dynamic;
+                            }
                         }
                     }
+                } else if (std.mem.eql(u8, reference_keyword, "$recursiveRef") and referenceAnchor(ctx, reference.value.string) != null) {
+                    if (hasRecursiveAnchor(target)) {
+                        if (recursiveTarget(ctx)) |dynamic| target = dynamic;
+                    }
                 }
-            } else if (std.mem.eql(u8, reference_keyword, "$recursiveRef") and referenceAnchor(ctx, reference.value.string) != null) {
-                if (hasRecursiveAnchor(target)) {
-                    if (recursiveTarget(ctx)) |dynamic| target = dynamic;
+                if (referenceActive(ctx, target, instance_path)) {
+                    try fail(ctx, schema, "reference loop detected", instance_path, reference_keyword);
+                    return;
                 }
+                const prior_prefix = ctx.ref_prefix;
+                const prior_stack = ctx.ref_stack;
+                ctx.ref_stack = try appendRefVisit(ctx.alloc, ctx.ref_stack, .{ .node = target, .instance_path = instance_path });
+                ctx.ref_prefix = try keywordPath(ctx, schema, reference_keyword);
+                defer ctx.ref_stack = prior_stack;
+                try visitSubschema(ctx, target, instance, instance_path);
+                ctx.ref_prefix = prior_prefix;
+                if (std.mem.eql(u8, reference_keyword, "$ref") and
+                    (schema.draft == .draft04 or schema.draft == .draft06 or schema.draft == .draft07)) return;
             }
-            if (referenceActive(ctx, target, instance_path)) {
-                try fail(ctx, schema, "reference loop detected", instance_path, reference_keyword);
-                return;
-            }
-            const prior_prefix = ctx.ref_prefix;
-            const prior_stack = ctx.ref_stack;
-            ctx.ref_stack = try appendRefVisit(ctx.alloc, ctx.ref_stack, .{ .node = target, .instance_path = instance_path });
-            ctx.ref_prefix = try keywordPath(ctx, schema, reference_keyword);
-            defer ctx.ref_stack = prior_stack;
-            try visitSubschema(ctx, target, instance, instance_path);
-            ctx.ref_prefix = prior_prefix;
-            if (std.mem.eql(u8, reference_keyword, "$ref") and
-                (schema.draft == .draft04 or schema.draft == .draft06 or schema.draft == .draft07)) return;
         }
     }
 
@@ -99,18 +147,21 @@ fn visit(ctx: *Context, schema: *const compile_mod.Node, instance: *const jv.Nod
             instanceType(instance),
         }), instance_path, "type");
     };
-    if (schema.keyword("const")) |constant| if (!equalValue(ctx.alloc, constant, instance)) {
-        try fail(ctx, schema, "must equal the schema const", instance_path, "const");
-    };
-    if (schema.keyword("enum")) |enumeration| if (enumeration.value == .array) {
-        var found = false;
-        for (enumeration.value.array) |candidate| if (equalValue(ctx.alloc, candidate, instance)) {
-            found = true;
+    if (schema.has_const) {
+        if (schema.keyword("const")) |constant| if (!equalValue(ctx.alloc, constant, instance))
+            try fail(ctx, schema, "must equal the schema const", instance_path, "const");
+    }
+    if (schema.has_enum) {
+        if (schema.keyword("enum")) |enumeration| if (enumeration.value == .array) {
+            var found = false;
+            for (enumeration.value.array) |candidate| if (equalValue(ctx.alloc, candidate, instance)) {
+                found = true;
+            };
+            if (!found) try fail(ctx, schema, "value is not in enum", instance_path, "enum");
         };
-        if (!found) try fail(ctx, schema, "value is not in enum", instance_path, "enum");
-    };
+    }
 
-    try validateCombinators(ctx, schema, instance, instance_path);
+    if (schema.has_combinators) try validateCombinators(ctx, schema, instance, instance_path);
     switch (instance.value) {
         .number => |text| try validateNumber(ctx, schema, text, instance_path),
         .string => |text| try validateString(ctx, schema, text, instance_path),
@@ -120,7 +171,11 @@ fn visit(ctx: *Context, schema: *const compile_mod.Node, instance: *const jv.Nod
     }
 }
 
-fn visitSubschema(ctx: *Context, schema: *const compile_mod.Node, instance: *const jv.Node, instance_path: []const u8) anyerror!void {
+fn visitSubschema(ctx: *Context, schema: *const compile_mod.Node, instance: *const jv.Node, instance_path: *const InstancePath) anyerror!void {
+    if (ctx.plan.draft != .draft2019_09 and ctx.plan.draft != .draft2020_12) {
+        try visit(ctx, schema, instance, instance_path);
+        return;
+    }
     var branch: Context = .{
         .alloc = ctx.alloc,
         .plan = ctx.plan,
@@ -135,39 +190,62 @@ fn visitSubschema(ctx: *Context, schema: *const compile_mod.Node, instance: *con
     if (branch.errors.items.len == 0) try mergeEvaluations(ctx, &branch);
 }
 
-fn validateNumber(ctx: *Context, schema: *const compile_mod.Node, text: []const u8, path: []const u8) anyerror!void {
+fn visitSubschemaAt(
+    ctx: *Context,
+    schema: *const compile_mod.Node,
+    instance: *const jv.Node,
+    parent_path: *const InstancePath,
+    token: PathToken,
+) anyerror!void {
+    const instance_path = InstancePath{ .parent = parent_path, .token = token };
+    try visitSubschema(ctx, schema, instance, &instance_path);
+}
+
+fn visitAt(
+    ctx: *Context,
+    schema: *const compile_mod.Node,
+    instance: *const jv.Node,
+    parent_path: *const InstancePath,
+    token: PathToken,
+) anyerror!void {
+    const instance_path = InstancePath{ .parent = parent_path, .token = token };
+    try visit(ctx, schema, instance, &instance_path);
+}
+
+fn validateNumber(ctx: *Context, schema: *const compile_mod.Node, text: []const u8, path: *const InstancePath) anyerror!void {
+    if (schema.numeric.multiple_of == null and schema.numeric.minimum == null and
+        schema.numeric.maximum == null and schema.numeric.exclusive_minimum == null and
+        schema.numeric.exclusive_maximum == null) return;
     const value = try number.parse(ctx.alloc, text);
-    if (schema.keyword("multipleOf")) |multiple| {
-        if (multiple.value == .number and !try number.multipleOf(ctx.alloc, value, try number.parse(ctx.alloc, multiple.value.number)))
+    if (schema.numeric.multiple_of != null) if (schema.keyword("multipleOf")) |multiple| {
+        if (multiple.value == .number and !try number.multipleOf(ctx.alloc, value, schema.numeric.multiple_of.?))
             try fail(ctx, schema, "must be a multiple of the schema value", path, "multipleOf");
-    }
+    };
     if (schema.draft == .draft04) {
-        const minimum = schema.keyword("minimum");
-        const exclusive_minimum = schema.keyword("exclusiveMinimum");
-        if (minimum) |bound| if (bound.value == .number) {
+        if (schema.numeric.minimum != null) if (schema.keyword("minimum")) |bound| if (bound.value == .number) {
+            const exclusive_minimum = schema.keyword("exclusiveMinimum");
             const exclusive = exclusive_minimum != null and exclusive_minimum.?.value == .boolean and exclusive_minimum.?.value.boolean;
-            try checkNumberBound(ctx, schema, value, bound.value.number, exclusive, true, path, if (exclusive) "exclusiveMinimum" else "minimum");
+            try checkNumberBound(ctx, schema, value, schema.numeric.minimum.?, bound.value.number, exclusive, true, path, if (exclusive) "exclusiveMinimum" else "minimum");
         };
-        const maximum = schema.keyword("maximum");
-        const exclusive_maximum = schema.keyword("exclusiveMaximum");
-        if (maximum) |bound| if (bound.value == .number) {
+        if (schema.numeric.maximum != null) if (schema.keyword("maximum")) |bound| if (bound.value == .number) {
+            const exclusive_maximum = schema.keyword("exclusiveMaximum");
             const exclusive = exclusive_maximum != null and exclusive_maximum.?.value == .boolean and exclusive_maximum.?.value.boolean;
-            try checkNumberBound(ctx, schema, value, bound.value.number, exclusive, false, path, if (exclusive) "exclusiveMaximum" else "maximum");
+            try checkNumberBound(ctx, schema, value, schema.numeric.maximum.?, bound.value.number, exclusive, false, path, if (exclusive) "exclusiveMaximum" else "maximum");
         };
     } else {
-        if (schema.keyword("minimum")) |bound| if (bound.value == .number)
-            try checkNumberBound(ctx, schema, value, bound.value.number, false, true, path, "minimum");
-        if (schema.keyword("maximum")) |bound| if (bound.value == .number)
-            try checkNumberBound(ctx, schema, value, bound.value.number, false, false, path, "maximum");
-        if (schema.keyword("exclusiveMinimum")) |bound| if (bound.value == .number)
-            try checkNumberBound(ctx, schema, value, bound.value.number, true, true, path, "exclusiveMinimum");
-        if (schema.keyword("exclusiveMaximum")) |bound| if (bound.value == .number)
-            try checkNumberBound(ctx, schema, value, bound.value.number, true, false, path, "exclusiveMaximum");
+        if (schema.numeric.minimum != null) if (schema.keyword("minimum")) |bound| if (bound.value == .number)
+            try checkNumberBound(ctx, schema, value, schema.numeric.minimum.?, bound.value.number, false, true, path, "minimum");
+        if (schema.numeric.maximum != null) if (schema.keyword("maximum")) |bound| if (bound.value == .number)
+            try checkNumberBound(ctx, schema, value, schema.numeric.maximum.?, bound.value.number, false, false, path, "maximum");
+        if (schema.numeric.exclusive_minimum != null) if (schema.keyword("exclusiveMinimum")) |bound| if (bound.value == .number)
+            try checkNumberBound(ctx, schema, value, schema.numeric.exclusive_minimum.?, bound.value.number, true, true, path, "exclusiveMinimum");
+        if (schema.numeric.exclusive_maximum != null) if (schema.keyword("exclusiveMaximum")) |bound| if (bound.value == .number)
+            try checkNumberBound(ctx, schema, value, schema.numeric.exclusive_maximum.?, bound.value.number, true, false, path, "exclusiveMaximum");
     }
 }
 
-fn checkNumberBound(ctx: *Context, schema: *const compile_mod.Node, value: number.Decimal, bound_text: []const u8, exclusive: bool, minimum: bool, path: []const u8, keyword: []const u8) !void {
-    const comparison = number.compare(value, try number.parse(ctx.alloc, bound_text));
+fn checkNumberBound(ctx: *Context, schema: *const compile_mod.Node, value: number.Decimal, bound: number.Decimal, bound_text: []const u8, exclusive: bool, minimum: bool, path: *const InstancePath, keyword: []const u8) !void {
+    const comparison = number.compare(value, bound);
     const passes = if (minimum)
         (if (exclusive) comparison == .gt else comparison != .lt)
     else
@@ -178,10 +256,12 @@ fn checkNumberBound(ctx: *Context, schema: *const compile_mod.Node, value: numbe
     }), path, keyword);
 }
 
-fn validateString(ctx: *Context, schema: *const compile_mod.Node, text: []const u8, path: []const u8) anyerror!void {
-    const length = try codepointLength(text);
-    try boundInteger(ctx, schema, "minLength", length, true, path);
-    try boundInteger(ctx, schema, "maxLength", length, false, path);
+fn validateString(ctx: *Context, schema: *const compile_mod.Node, text: []const u8, path: *const InstancePath) anyerror!void {
+    if (schema.numeric.min_length != null or schema.numeric.max_length != null) {
+        const length = try codepointLength(text);
+        if (schema.numeric.min_length) |limit| try boundInteger(ctx, schema, "minLength", length, true, limit, path);
+        if (schema.numeric.max_length) |limit| try boundInteger(ctx, schema, "maxLength", length, false, limit, path);
+    }
     if (schema.keyword("pattern")) |pattern| {
         if (pattern.value == .string) {
             const expression = schema.pattern(pattern.value.string) orelse return error.MissingCompiledPattern;
@@ -196,10 +276,10 @@ fn validateObject(
     schema: *const compile_mod.Node,
     instance: *const jv.Node,
     members: []const jv.Member,
-    path: []const u8,
+    path: *const InstancePath,
 ) anyerror!void {
-    try boundInteger(ctx, schema, "minProperties", members.len, true, path);
-    try boundInteger(ctx, schema, "maxProperties", members.len, false, path);
+    if (schema.numeric.min_properties) |limit| try boundInteger(ctx, schema, "minProperties", members.len, true, limit, path);
+    if (schema.numeric.max_properties) |limit| try boundInteger(ctx, schema, "maxProperties", members.len, false, limit, path);
     if (schema.keyword("required")) |required| if (required.value == .array) {
         for (required.value.array) |item| {
             if (item.value != .string) continue;
@@ -208,58 +288,62 @@ fn validateObject(
         }
     };
 
+    const pattern_properties = schema.keyword("patternProperties");
+    const additional_schema = schema.child("additionalProperties", null);
+    const additional_keyword = schema.keyword("additionalProperties");
+    const property_names = schema.child("propertyNames", null);
     for (members) |member| {
         var matched = false;
         if (schema.child("properties", member.key)) |child| {
             matched = true;
             try markProperty(ctx, path, member.key);
-            try visitSubschema(ctx, child, member.value, try appendInstance(ctx.alloc, path, member.key));
+            try visitSubschemaAt(ctx, child, member.value, path, .{ .key = member.key });
         }
-        if (schema.keyword("patternProperties")) |patterns| if (patterns.value == .object) {
+        if (pattern_properties) |patterns| if (patterns.value == .object) {
             for (patterns.value.object) |pattern_entry| {
                 const expression = schema.pattern(pattern_entry.key) orelse continue;
                 if (try expression.matches(ctx.alloc, member.key)) {
                     matched = true;
                     try markProperty(ctx, path, member.key);
                     if (schema.child("patternProperties", pattern_entry.key)) |child|
-                        try visitSubschema(ctx, child, member.value, try appendInstance(ctx.alloc, path, member.key));
+                        try visitSubschemaAt(ctx, child, member.value, path, .{ .key = member.key });
                 }
             }
         };
         if (!matched) {
-            if (schema.child("additionalProperties", null)) |child| {
+            if (additional_schema) |child| {
                 try markProperty(ctx, path, member.key);
-                try visitSubschema(ctx, child, member.value, try appendInstance(ctx.alloc, path, member.key));
-            } else if (schema.keyword("additionalProperties")) |additional| {
+                try visitSubschemaAt(ctx, child, member.value, path, .{ .key = member.key });
+            } else if (additional_keyword) |additional| {
                 try markProperty(ctx, path, member.key);
                 if (additional.value == .boolean and !additional.value.boolean)
                     try fail(ctx, schema, try std.fmt.allocPrint(ctx.alloc, "property '{s}' is not allowed", .{member.key}), path, "additionalProperties");
             }
         }
-        if (schema.child("propertyNames", null)) |child| {
+        if (property_names) |child| {
             const name_node = try ctx.alloc.create(jv.Node);
             name_node.* = .{ .value = .{ .string = member.key } };
-            try visitSubschema(ctx, child, name_node, try appendInstance(ctx.alloc, path, member.key));
+            try visitSubschemaAt(ctx, child, name_node, path, .{ .key = member.key });
         }
     }
 
-    try validateDependencies(ctx, schema, instance, members, path);
+    if (schema.has_dependencies) try validateDependencies(ctx, schema, instance, members, path);
     if (schema.draft == .draft2019_09 or schema.draft == .draft2020_12) {
         if (schema.keyword("unevaluatedProperties")) |unevaluated| {
             for (members) |member| {
-                if (wasPropertyEvaluated(ctx, path, member.key)) continue;
+                if (try wasPropertyEvaluated(ctx, path, member.key)) continue;
                 if (unevaluated.value == .boolean and !unevaluated.value.boolean)
                     try fail(ctx, schema, try std.fmt.allocPrint(ctx.alloc, "property '{s}' is not allowed", .{member.key}), path, "unevaluatedProperties")
                 else if (schema.child("unevaluatedProperties", null)) |child| {
                     try markProperty(ctx, path, member.key);
-                    try visitSubschema(ctx, child, member.value, try appendInstance(ctx.alloc, path, member.key));
+                    try visitSubschemaAt(ctx, child, member.value, path, .{ .key = member.key });
                 }
             }
         }
     }
 }
 
-fn validateDependencies(ctx: *Context, schema: *const compile_mod.Node, instance: *const jv.Node, members: []const jv.Member, path: []const u8) anyerror!void {
+fn validateDependencies(ctx: *Context, schema: *const compile_mod.Node, instance: *const jv.Node, members: []const jv.Member, path: *const InstancePath) anyerror!void {
     for ([_][]const u8{ "dependencies", "dependentRequired" }) |keyword| {
         const dependencies = schema.keyword(keyword) orelse continue;
         if (dependencies.value != .object) continue;
@@ -295,10 +379,10 @@ fn validateDependencies(ctx: *Context, schema: *const compile_mod.Node, instance
     _ = members;
 }
 
-fn validateArray(ctx: *Context, schema: *const compile_mod.Node, instance: *const jv.Node, items: []const *jv.Node, path: []const u8) anyerror!void {
+fn validateArray(ctx: *Context, schema: *const compile_mod.Node, instance: *const jv.Node, items: []const *jv.Node, path: *const InstancePath) anyerror!void {
     _ = instance;
-    try boundInteger(ctx, schema, "minItems", items.len, true, path);
-    try boundInteger(ctx, schema, "maxItems", items.len, false, path);
+    if (schema.numeric.min_items) |limit| try boundInteger(ctx, schema, "minItems", items.len, true, limit, path);
+    if (schema.numeric.max_items) |limit| try boundInteger(ctx, schema, "maxItems", items.len, false, limit, path);
     if (schema.keyword("uniqueItems")) |unique| if (unique.value == .boolean and unique.value.boolean) {
         for (items, 0..) |item, index| for (items[index + 1 ..]) |other| {
             if (try equalNode(ctx.alloc, item, other)) {
@@ -310,25 +394,32 @@ fn validateArray(ctx: *Context, schema: *const compile_mod.Node, instance: *cons
 
     var prefix_count: usize = 0;
     const prefix_keyword = if (schema.draft == .draft2020_12) "prefixItems" else "items";
-    const tuple_items = schema.draft != .draft2020_12 and schema.keyword("items") != null and
-        schema.keyword("items").?.value == .array;
-    if (schema.keyword(prefix_keyword)) |prefix| if (prefix.value == .array) {
-        prefix_count = @min(items.len, prefix.value.array.len);
+    const items_keyword = schema.keyword("items");
+    const tuple_items = schema.draft != .draft2020_12 and items_keyword != null and
+        items_keyword.?.value == .array;
+    const prefix = schema.keyword(prefix_keyword);
+    const items_schema = if (!tuple_items) schema.child("items", null) else null;
+    const additional_items_schema = if (tuple_items) schema.child("additionalItems", null) else null;
+    const additional_items_keyword = if (tuple_items) schema.keyword("additionalItems") else null;
+    if (prefix) |prefix_value| if (prefix_value.value == .array) {
+        prefix_count = @min(items.len, prefix_value.value.array.len);
         for (0..prefix_count) |index| {
             try markItem(ctx, path, index);
-            if (schema.child(prefix_keyword, try std.fmt.allocPrint(ctx.alloc, "{d}", .{index}))) |child|
-                try visitSubschema(ctx, child, items[index], try appendInstance(ctx.alloc, path, try std.fmt.allocPrint(ctx.alloc, "{d}", .{index})));
+            var index_buffer: [20]u8 = undefined;
+            const index_text = try std.fmt.bufPrint(&index_buffer, "{d}", .{index});
+            if (schema.child(prefix_keyword, index_text)) |child|
+                try visitSubschemaAt(ctx, child, items[index], path, .{ .index = index });
         }
     };
     for (items[prefix_count..], prefix_count..) |item, index| {
-        if (schema.child("items", null)) |child| {
+        if (items_schema) |child| {
             try markItem(ctx, path, index);
-            try visitSubschema(ctx, child, item, try appendInstance(ctx.alloc, path, try std.fmt.allocPrint(ctx.alloc, "{d}", .{index})));
+            try visitSubschemaAt(ctx, child, item, path, .{ .index = index });
         } else if (tuple_items) {
-            if (schema.child("additionalItems", null)) |child| {
+            if (additional_items_schema) |child| {
                 try markItem(ctx, path, index);
-                try visitSubschema(ctx, child, item, try appendInstance(ctx.alloc, path, try std.fmt.allocPrint(ctx.alloc, "{d}", .{index})));
-            } else if (schema.keyword("additionalItems")) |item_schema| {
+                try visitSubschemaAt(ctx, child, item, path, .{ .index = index });
+            } else if (additional_items_keyword) |item_schema| {
                 try markItem(ctx, path, index);
                 if (item_schema.value == .boolean and !item_schema.value.boolean)
                     try fail(ctx, schema, "additional array item is not allowed", path, "additionalItems");
@@ -340,36 +431,36 @@ fn validateArray(ctx: *Context, schema: *const compile_mod.Node, instance: *cons
         var count: usize = 0;
         for (items, 0..) |item, index| {
             var branch: Context = .{ .alloc = ctx.alloc, .plan = ctx.plan, .verbose = false, .depth = ctx.depth, .ref_prefix = ctx.ref_prefix, .dynamic_scope = ctx.dynamic_scope, .ref_stack = ctx.ref_stack };
-            try visit(&branch, contains, item, try appendInstance(ctx.alloc, path, try std.fmt.allocPrint(ctx.alloc, "{d}", .{index})));
+            try visitAt(&branch, contains, item, path, .{ .index = index });
             if (branch.errors.items.len == 0) {
                 count += 1;
                 try markItem(ctx, path, index);
                 try mergeEvaluations(ctx, &branch);
             }
         }
-        if (schema.keyword("minContains") == null and count == 0)
+        if (schema.numeric.min_contains == null and count == 0)
             try fail(ctx, schema, "array must contain a matching item", path, "contains")
-        else
-            try boundInteger(ctx, schema, "minContains", count, true, path);
-        try boundInteger(ctx, schema, "maxContains", count, false, path);
+        else if (schema.numeric.min_contains) |limit|
+            try boundInteger(ctx, schema, "minContains", count, true, limit, path);
+        if (schema.numeric.max_contains) |limit| try boundInteger(ctx, schema, "maxContains", count, false, limit, path);
     }
     if (schema.draft == .draft2019_09 or schema.draft == .draft2020_12) {
         if (schema.keyword("unevaluatedItems")) |unevaluated| {
             for (items, 0..) |item, index| {
-                if (wasItemEvaluated(ctx, path, index)) continue;
+                if (try wasItemEvaluated(ctx, path, index)) continue;
                 if (unevaluated.value == .boolean and !unevaluated.value.boolean) {
-                    const item_path = try appendInstance(ctx.alloc, path, try std.fmt.allocPrint(ctx.alloc, "{d}", .{index}));
-                    try fail(ctx, schema, "array item is not allowed", item_path, "unevaluatedItems");
+                    const item_path = InstancePath{ .parent = path, .token = .{ .index = index } };
+                    try fail(ctx, schema, "array item is not allowed", &item_path, "unevaluatedItems");
                 } else if (schema.child("unevaluatedItems", null)) |child| {
                     try markItem(ctx, path, index);
-                    try visitSubschema(ctx, child, item, try appendInstance(ctx.alloc, path, try std.fmt.allocPrint(ctx.alloc, "{d}", .{index})));
+                    try visitSubschemaAt(ctx, child, item, path, .{ .index = index });
                 }
             }
         }
     }
 }
 
-fn validateCombinators(ctx: *Context, schema: *const compile_mod.Node, instance: *const jv.Node, path: []const u8) anyerror!void {
+fn validateCombinators(ctx: *Context, schema: *const compile_mod.Node, instance: *const jv.Node, path: *const InstancePath) anyerror!void {
     if (schema.keyword("allOf")) |all| if (all.value == .array) {
         var all_valid = true;
         var annotations: std.ArrayListUnmanaged(Evaluation) = .empty;
@@ -453,14 +544,15 @@ fn validateCombinators(ctx: *Context, schema: *const compile_mod.Node, instance:
     }
 }
 
-fn boundInteger(ctx: *Context, schema: *const compile_mod.Node, keyword: []const u8, value: usize, minimum: bool, path: []const u8) anyerror!void {
-    const bound = schema.keyword(keyword) orelse return;
-    if (bound.value != .number) return;
-    const actual = try number.parse(ctx.alloc, try std.fmt.allocPrint(ctx.alloc, "{d}", .{value}));
-    const limit = try number.parse(ctx.alloc, bound.value.number);
+fn boundInteger(ctx: *Context, schema: *const compile_mod.Node, keyword: []const u8, value: usize, minimum: bool, limit: number.Decimal, path: *const InstancePath) anyerror!void {
+    var actual_buffer: [20]u8 = undefined;
+    const actual_text = try std.fmt.bufPrint(&actual_buffer, "{d}", .{value});
+    const actual = number.Decimal{ .negative = false, .digits = actual_text, .scale = 0, .lexical_integer = true };
     const comparison = number.compare(actual, limit);
-    if ((minimum and comparison == .lt) or (!minimum and comparison == .gt))
+    if ((minimum and comparison == .lt) or (!minimum and comparison == .gt)) {
+        const bound = schema.keyword(keyword) orelse return error.MissingCompiledNumber;
         try fail(ctx, schema, try std.fmt.allocPrint(ctx.alloc, "{s} is {d}, limit is {s}", .{ keyword, value, bound.value.number }), path, keyword);
+    }
 }
 
 fn matchesDiscriminator(alloc: std.mem.Allocator, schema: *const compile_mod.Node, instance: *const jv.Node) bool {
@@ -566,6 +658,14 @@ fn objectField(node: *const jv.Node, name: []const u8) ?*const jv.Node {
 fn codepointLength(text: []const u8) !usize {
     var count: usize = 0;
     var position: usize = 0;
+    while (text.len - position >= 8) {
+        var bytes: [8]u8 = undefined;
+        @memcpy(&bytes, text[position..][0..8]);
+        const chunk = std.mem.readInt(u64, &bytes, .little);
+        if (chunk & 0x8080808080808080 != 0) break;
+        position += 8;
+        count += 8;
+    }
     while (position < text.len) {
         const length = std.unicode.utf8ByteSequenceLength(text[position]) catch return error.InvalidUtf8;
         position += length;
@@ -575,32 +675,32 @@ fn codepointLength(text: []const u8) !usize {
     return count;
 }
 
-fn appendInstance(alloc: std.mem.Allocator, path: []const u8, token: []const u8) ![]const u8 {
-    return compile_mod.keywordPath(alloc, path, token);
+fn markProperty(ctx: *Context, path: *const InstancePath, name: []const u8) !void {
+    if (ctx.plan.draft != .draft2019_09 and ctx.plan.draft != .draft2020_12) return;
+    try ctx.evaluations.append(ctx.alloc, .{ .property = .{ .path = try path.render(ctx.alloc), .name = name } });
 }
 
-fn markProperty(ctx: *Context, path: []const u8, name: []const u8) !void {
-    try ctx.evaluations.append(ctx.alloc, .{ .property = .{ .path = path, .name = name } });
+fn markItem(ctx: *Context, path: *const InstancePath, index: usize) !void {
+    if (ctx.plan.draft != .draft2019_09 and ctx.plan.draft != .draft2020_12) return;
+    try ctx.evaluations.append(ctx.alloc, .{ .item = .{ .path = try path.render(ctx.alloc), .index = index } });
 }
 
-fn markItem(ctx: *Context, path: []const u8, index: usize) !void {
-    try ctx.evaluations.append(ctx.alloc, .{ .item = .{ .path = path, .index = index } });
-}
-
-fn wasPropertyEvaluated(ctx: *const Context, path: []const u8, name: []const u8) bool {
+fn wasPropertyEvaluated(ctx: *const Context, path: *const InstancePath, name: []const u8) !bool {
+    const instance_path = try path.render(ctx.alloc);
     for (ctx.evaluations.items) |evaluation| switch (evaluation) {
         .property => |property| {
-            if (std.mem.eql(u8, property.path, path) and std.mem.eql(u8, property.name, name)) return true;
+            if (std.mem.eql(u8, property.path, instance_path) and std.mem.eql(u8, property.name, name)) return true;
         },
         .item => {},
     };
     return false;
 }
 
-fn wasItemEvaluated(ctx: *const Context, path: []const u8, index: usize) bool {
+fn wasItemEvaluated(ctx: *const Context, path: *const InstancePath, index: usize) !bool {
+    const instance_path = try path.render(ctx.alloc);
     for (ctx.evaluations.items) |evaluation| switch (evaluation) {
         .item => |item| {
-            if (std.mem.eql(u8, item.path, path) and item.index == index) return true;
+            if (std.mem.eql(u8, item.path, instance_path) and item.index == index) return true;
         },
         .property => {},
     };
@@ -630,9 +730,9 @@ fn appendRefVisit(alloc: std.mem.Allocator, stack: []const RefVisit, ref_visit: 
     return updated;
 }
 
-fn referenceActive(ctx: *const Context, node: *const compile_mod.Node, instance_path: []const u8) bool {
+fn referenceActive(ctx: *const Context, node: *const compile_mod.Node, instance_path: *const InstancePath) bool {
     for (ctx.ref_stack) |prior_visit| {
-        if (prior_visit.node == node and std.mem.eql(u8, prior_visit.instance_path, instance_path)) return true;
+        if (prior_visit.node == node and prior_visit.instance_path == instance_path) return true;
     }
     return false;
 }
@@ -683,9 +783,9 @@ fn keywordPath(ctx: *Context, schema: *const compile_mod.Node, name: []const u8)
     return location;
 }
 
-fn fail(ctx: *Context, schema: *const compile_mod.Node, message: []const u8, instance_path: []const u8, keyword: []const u8) !void {
+fn fail(ctx: *Context, schema: *const compile_mod.Node, message: []const u8, instance_path: *const InstancePath, keyword: []const u8) !void {
     try ctx.errors.append(ctx.alloc, .{
-        .instanceLocation = instance_path,
+        .instanceLocation = try instance_path.render(ctx.alloc),
         .keywordLocation = try keywordPath(ctx, schema, keyword),
         .@"error" = message,
     });

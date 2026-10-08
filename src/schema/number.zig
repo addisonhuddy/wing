@@ -52,27 +52,36 @@ pub fn parse(alloc: std.mem.Allocator, text: []const u8) !Decimal {
     }
     if (index != text.len) return error.InvalidNumber;
 
-    var digits = std.ArrayListUnmanaged(u8).empty;
-    try digits.appendSlice(alloc, text[integer_start..integer_end]);
-    if (has_fraction) try digits.appendSlice(alloc, text[fraction_start..fraction_end]);
+    if (!has_fraction and !has_exponent) return .{
+        .negative = negative,
+        .digits = text[integer_start..integer_end],
+        .scale = 0,
+        .lexical_integer = true,
+    };
+
+    const integer_length = integer_end - integer_start;
+    const fraction_length = fraction_end - fraction_start;
+    const digits = try alloc.alloc(u8, integer_length + fraction_length);
+    @memcpy(digits[0..integer_length], text[integer_start..integer_end]);
+    if (has_fraction)
+        @memcpy(digits[integer_length..], text[fraction_start..fraction_end]);
     var first: usize = 0;
-    while (first < digits.items.len and digits.items[first] == '0') : (first += 1) {}
-    if (first == digits.items.len) return .{
+    while (first < digits.len and digits[first] == '0') : (first += 1) {}
+    if (first == digits.len) return .{
         .negative = false,
         .digits = "0",
         .scale = 0,
         .lexical_integer = !has_fraction and !has_exponent,
     };
-    var last = digits.items.len;
+    var last = digits.len;
     var scale = std.math.sub(i64, @intCast(fraction_end - fraction_start), exponent) catch return error.ExponentTooLarge;
-    while (last > first + 1 and digits.items[last - 1] == '0') {
+    while (last > first + 1 and digits[last - 1] == '0') {
         last -= 1;
         scale = std.math.sub(i64, scale, 1) catch return error.ExponentTooLarge;
     }
-    const normalized = try alloc.dupe(u8, digits.items[first..last]);
     return .{
         .negative = negative,
-        .digits = normalized,
+        .digits = digits[first..last],
         .scale = scale,
         .lexical_integer = !has_fraction and !has_exponent,
     };
@@ -85,6 +94,8 @@ pub fn compare(a: Decimal, b: Decimal) std.math.Order {
     const a_negative = a.negative and !a_zero;
     const b_negative = b.negative and !b_zero;
     if (a_negative != b_negative) return if (a_negative) .lt else .gt;
+    if (a_zero) return .lt;
+    if (b_zero) return .gt;
     const magnitude = compareMagnitude(a, b);
     if (!a_negative) return magnitude;
     return switch (magnitude) {
@@ -114,6 +125,13 @@ fn compareMagnitude(a: Decimal, b: Decimal) std.math.Order {
 pub fn multipleOf(alloc: std.mem.Allocator, value: Decimal, divisor: Decimal) !bool {
     if (std.mem.eql(u8, divisor.digits, "0")) return false;
     if (std.mem.eql(u8, value.digits, "0")) return true;
+    if (std.mem.eql(u8, divisor.digits, "1")) {
+        var value_scale = value.scale;
+        var last = value.digits.len;
+        while (last > 0 and value.digits[last - 1] == '0') : (last -= 1)
+            value_scale = std.math.sub(i64, value_scale, 1) catch return error.ExponentTooLarge;
+        return value_scale <= divisor.scale;
+    }
     const shift = std.math.sub(i64, divisor.scale, value.scale) catch return error.ExponentTooLarge;
     if (shift > 100_000 or shift < -100_000) return error.ExpansionTooLarge;
     var numerator = std.ArrayListUnmanaged(u8).empty;
@@ -193,7 +211,13 @@ test "decimal comparison and numeric equality are exact" {
     const b = try parse(alloc, "1.0");
     const huge = try parse(alloc, "900719925474099312345");
     const larger = try parse(alloc, "900719925474099312346");
+    const zero = try parse(alloc, "0");
+    const positive_fraction = try parse(alloc, "0.1");
+    const negative_fraction = try parse(alloc, "-0.1");
     try std.testing.expect(equal(a, b));
+    try std.testing.expectEqual(std.math.Order.gt, compare(positive_fraction, zero));
+    try std.testing.expectEqual(std.math.Order.lt, compare(zero, positive_fraction));
+    try std.testing.expectEqual(std.math.Order.lt, compare(negative_fraction, zero));
     try std.testing.expect(compare(huge, larger) == .lt);
     try std.testing.expectEqual(std.math.Order.gt, compare(try parse(alloc, "-1e308"), try parse(alloc, "-1e307")));
 }
@@ -207,6 +231,9 @@ test "draft integer rules and decimal multipleOf" {
     try std.testing.expect(!try parse(alloc, "1e0").isInteger(true));
     try std.testing.expect(one_point_zero.isInteger(false));
     try std.testing.expect(try multipleOf(alloc, try parse(alloc, "0.015"), try parse(alloc, "0.0075")));
+    try std.testing.expect(try multipleOf(alloc, try parse(alloc, "23.64"), try parse(alloc, "0.01")));
+    try std.testing.expect(!(try multipleOf(alloc, try parse(alloc, "1.234"), try parse(alloc, "0.01"))));
+    try std.testing.expect(try multipleOf(alloc, try parse(alloc, "100"), try parse(alloc, "10")));
     try std.testing.expect(!(try multipleOf(alloc, try parse(alloc, "0.01"), try parse(alloc, "0.0075"))));
     try std.testing.expect(try multipleOf(alloc, try parse(alloc, "1e-8"), try parse(alloc, "1e-8")));
     try std.testing.expect(try multipleOf(alloc, try parse(alloc, "1e308"), try parse(alloc, "1e-8")));

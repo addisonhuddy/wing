@@ -1,48 +1,59 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "type": "object",
-  "required": ["id", "createdAt", "amount", "customer", "tags", "payload"],
+  "required": ["id", "name", "email", "tags", "amount", "items", "note"],
   "properties": {
     "id": {
       "type": "integer",
       "minimum": 0
     },
-    "createdAt": {
+    "name": {
       "type": "string",
-      "format": "date-time"
+      "pattern": "^n[0-9]+$"
+    },
+    "email": {
+      "type": "string",
+      "pattern": "^[^@]+@[^@]+\\.[^@]+$"
     },
     "amount": {
       "type": "number",
       "minimum": 0,
+      "maximum": 100,
       "multipleOf": 0.01
-    },
-    "customer": {
-      "type": "object",
-      "required": ["id", "country"],
-      "properties": {
-        "id": {
-          "type": "string",
-          "pattern": "^[A-Z0-9]{8}$"
-        },
-        "country": {
-          "type": "string",
-          "pattern": "^[A-Z]{2}$"
-        }
-      },
-      "additionalProperties": false
     },
     "tags": {
       "type": "array",
+      "minItems": 3,
       "items": {
         "type": "string",
         "minLength": 1
       },
       "maxItems": 8
     },
-    "payload": {
+    "items": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "required": ["sku", "qty"],
+        "properties": {
+          "sku": {
+            "type": "string",
+            "pattern": "^s[0-9]+$"
+          },
+          "qty": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 7
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "note": {
       "type": "string",
-      "minLength": 700,
-      "maxLength": 900
+      "minLength": 500,
+      "maxLength": 500
     }
   },
   "additionalProperties": false

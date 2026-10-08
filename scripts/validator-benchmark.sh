@@ -3,34 +3,50 @@ set -euo pipefail
 
 readonly repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly binary="${WING_BIN:-${repo_root}/zig-out/bin/wing}"
-readonly schema_file="${repo_root}/scripts/validator-benchmark-schema.json"
-readonly records="${1:-100000}"
+readonly input="${1:-/tmp/bench.jsonl}"
+readonly prepared_input="$(mktemp "${TMPDIR:-/tmp}/wing-validator-benchmark.XXXXXX")"
+trap 'rm -f "$prepared_input"' EXIT
 
-start_ns="$(date +%s%N)"
-python3 - "$records" <<'PY' | "$binary" _validate "$schema_file" --draft draft7 >/dev/null
+if [[ ! -r "$input" ]]; then
+  printf 'benchmark input is not readable: %s\n' "$input" >&2
+  exit 1
+fi
+
+python3 - "$input" "$prepared_input" <<'PY'
 import json
 import sys
 
-count = int(sys.argv[1])
-payload = "x" * 780
-for index in range(count):
-    record = {
-        "id": index,
-        "createdAt": "2026-10-01T12:00:00Z",
-        "amount": 12.34,
-        "customer": {"id": f"C{index % 10000000:07d}", "country": "US"},
-        "tags": ["orders", "validated"],
-        "payload": payload,
-    }
-    print(json.dumps(record, separators=(",", ":")))
+source, destination = sys.argv[1:]
+with open(source, encoding="utf-8") as records, open(destination, "w", encoding="utf-8") as output:
+    for line in records:
+        record = json.loads(line)
+        record["amount"] = round(record["amount"], 2)
+        output.write(json.dumps(record, separators=(",", ":"), allow_nan=False) + "\n")
 PY
-end_ns="$(date +%s%N)"
-elapsed_ns="$((end_ns - start_ns))"
-python3 - "$records" "$elapsed_ns" <<'PY'
+
+readonly records="$(wc -l < "$prepared_input" | tr -d ' ')"
+
+run_benchmark() {
+  local name="$1"
+  local schema="$2"
+  local start_ns
+  local end_ns
+  local elapsed_ns
+
+  start_ns="$(date +%s%N)"
+  "$binary" _validate "$schema" --draft draft7 < "$prepared_input" > /dev/null
+  end_ns="$(date +%s%N)"
+  elapsed_ns="$((end_ns - start_ns))"
+  python3 - "$name" "$records" "$elapsed_ns" <<'PY'
 import sys
 
-records = int(sys.argv[1])
-elapsed_ns = int(sys.argv[2])
+name = sys.argv[1]
+records = int(sys.argv[2])
+elapsed_ns = int(sys.argv[3])
 elapsed_seconds = elapsed_ns / 1_000_000_000
-print(f"{records} records in {elapsed_seconds:.3f}s ({records / elapsed_seconds:.0f} records/s)")
+print(f"{name}: {records} valid records in {elapsed_seconds:.3f}s ({records / elapsed_seconds:.0f} records/s)")
 PY
+}
+
+run_benchmark object "${repo_root}/scripts/validator-benchmark-object-schema.json"
+run_benchmark realistic "${repo_root}/scripts/validator-benchmark-schema.json"

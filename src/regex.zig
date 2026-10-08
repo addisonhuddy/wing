@@ -412,6 +412,93 @@ pub const Regex = struct {
     }
 
     pub fn matchesWithBudget(self: *const Regex, alloc: std.mem.Allocator, text: []const u8, budget: ?*usize) !bool {
+        const use_scratch = text.len <= 512 and self.instructions.len <= 256;
+        if (use_scratch) return self.matchWithStack(text, budget);
+        return self.matchWithAllocator(alloc, text, budget);
+    }
+
+    fn matchWithStack(self: *const Regex, text: []const u8, budget: ?*usize) !bool {
+        var points: [512]u21 = undefined;
+        const point_count = try decodeStack(text, &points);
+        var current_storage: [256]usize = undefined;
+        var next_storage: [256]usize = undefined;
+        var current_seen_storage: [256]bool = undefined;
+        var next_seen_storage: [256]bool = undefined;
+        var current: *[256]usize = &current_storage;
+        var next: *[256]usize = &next_storage;
+        var current_seen: *[256]bool = &current_seen_storage;
+        var next_seen: *[256]bool = &next_seen_storage;
+        var current_len: usize = 0;
+        var next_len: usize = 0;
+        @memset(current_seen[0..self.instructions.len], false);
+        @memset(next_seen[0..self.instructions.len], false);
+
+        for (0..point_count + 1) |position| {
+            try self.addStateStack(current, &current_len, current_seen, self.start, position, points[0..point_count], budget);
+            for (current[0..current_len]) |index| if (self.instructions[index].op == .match) return true;
+            if (position == point_count) break;
+            next_len = 0;
+            @memset(next_seen[0..self.instructions.len], false);
+            for (current[0..current_len]) |index| {
+                if (budget) |steps| {
+                    steps.* += 1;
+                    if (steps.* > 20_000_000) return error.StepLimit;
+                }
+                const instruction = self.instructions[index];
+                const accepted = switch (instruction.op) {
+                    .character => points[position] == instruction.character,
+                    .any => !isLineTerminator(points[position]),
+                    .character_class => classMatches(self.classes[instruction.class_index], points[position]),
+                    else => false,
+                };
+                if (accepted)
+                    try self.addStateStack(next, &next_len, next_seen, instruction.out, position + 1, points[0..point_count], budget);
+            }
+            std.mem.swap(*[256]usize, &current, &next);
+            std.mem.swap(usize, &current_len, &next_len);
+            std.mem.swap(*[256]bool, &current_seen, &next_seen);
+        }
+        return false;
+    }
+
+    fn addStateStack(
+        self: *const Regex,
+        list: *[256]usize,
+        count: *usize,
+        seen: *[256]bool,
+        index: usize,
+        position: usize,
+        points: []const u21,
+        budget: ?*usize,
+    ) anyerror!void {
+        if (index == unset or index >= self.instructions.len or seen[index]) return;
+        seen[index] = true;
+        if (budget) |steps| {
+            steps.* += 1;
+            if (steps.* > 20_000_000) return error.StepLimit;
+        }
+        const instruction = self.instructions[index];
+        switch (instruction.op) {
+            .split => {
+                try self.addStateStack(list, count, seen, instruction.out, position, points, budget);
+                try self.addStateStack(list, count, seen, instruction.out2, position, points, budget);
+            },
+            .begin => if (position == 0) try self.addStateStack(list, count, seen, instruction.out, position, points, budget),
+            .end => if (position == points.len) try self.addStateStack(list, count, seen, instruction.out, position, points, budget),
+            .boundary => {
+                const previous = position > 0 and isWord(points[position - 1]);
+                const following = position < points.len and isWord(points[position]);
+                if ((previous != following) != instruction.negate)
+                    try self.addStateStack(list, count, seen, instruction.out, position, points, budget);
+            },
+            else => {
+                list[count.*] = index;
+                count.* += 1;
+            },
+        }
+    }
+
+    fn matchWithAllocator(self: *const Regex, alloc: std.mem.Allocator, text: []const u8, budget: ?*usize) !bool {
         const points = try decode(alloc, text);
         defer alloc.free(points);
         var current: std.ArrayListUnmanaged(usize) = .empty;
@@ -497,6 +584,26 @@ fn decode(alloc: std.mem.Allocator, text: []const u8) ![]u21 {
         position = end;
     }
     return points.toOwnedSlice(alloc);
+}
+
+fn decodeStack(text: []const u8, points: *[512]u21) !usize {
+    var position: usize = 0;
+    var count: usize = 0;
+    while (position < text.len) {
+        if (text[position] < 0x80) {
+            points[count] = text[position];
+            position += 1;
+            count += 1;
+            continue;
+        }
+        const length = std.unicode.utf8ByteSequenceLength(text[position]) catch return error.InvalidUtf8;
+        const end = position + length;
+        if (end > text.len) return error.InvalidUtf8;
+        points[count] = std.unicode.utf8Decode(text[position..end]) catch return error.InvalidUtf8;
+        position = end;
+        count += 1;
+    }
+    return count;
 }
 
 fn isLineTerminator(point: u21) bool {

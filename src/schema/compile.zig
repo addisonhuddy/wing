@@ -3,6 +3,7 @@ const jv = @import("../jv.zig");
 const metaschemas = @import("metaschemas.zig");
 const regex = @import("../regex.zig");
 const uri = @import("uri.zig");
+const number = @import("number.zig");
 
 pub const Draft = metaschemas.Draft;
 pub const MetaRegistration = struct { uri: []const u8, draft: Draft };
@@ -17,6 +18,25 @@ pub const Keyword = struct {
     name: []const u8,
     value: *const jv.Node,
     location: []const u8,
+};
+pub const NumericKeywords = struct {
+    multiple_of: ?number.Decimal = null,
+    minimum: ?number.Decimal = null,
+    maximum: ?number.Decimal = null,
+    exclusive_minimum: ?number.Decimal = null,
+    exclusive_maximum: ?number.Decimal = null,
+    min_length: ?number.Decimal = null,
+    max_length: ?number.Decimal = null,
+    min_items: ?number.Decimal = null,
+    max_items: ?number.Decimal = null,
+    min_contains: ?number.Decimal = null,
+    max_contains: ?number.Decimal = null,
+    min_properties: ?number.Decimal = null,
+    max_properties: ?number.Decimal = null,
+
+    fn set(self: *NumericKeywords, name: []const u8, value: number.Decimal) void {
+        if (std.mem.eql(u8, name, "multipleOf")) self.multiple_of = value else if (std.mem.eql(u8, name, "minimum")) self.minimum = value else if (std.mem.eql(u8, name, "maximum")) self.maximum = value else if (std.mem.eql(u8, name, "exclusiveMinimum")) self.exclusive_minimum = value else if (std.mem.eql(u8, name, "exclusiveMaximum")) self.exclusive_maximum = value else if (std.mem.eql(u8, name, "minLength")) self.min_length = value else if (std.mem.eql(u8, name, "maxLength")) self.max_length = value else if (std.mem.eql(u8, name, "minItems")) self.min_items = value else if (std.mem.eql(u8, name, "maxItems")) self.max_items = value else if (std.mem.eql(u8, name, "minContains")) self.min_contains = value else if (std.mem.eql(u8, name, "maxContains")) self.max_contains = value else if (std.mem.eql(u8, name, "minProperties")) self.min_properties = value else if (std.mem.eql(u8, name, "maxProperties")) self.max_properties = value;
+    }
 };
 pub const Child = struct {
     keyword: []const u8,
@@ -40,21 +60,44 @@ pub const Node = struct {
     draft: Draft,
     vocabularies: Vocabularies,
     keywords: []const Keyword,
+    active_keywords: []const Keyword = &.{},
+    numeric: NumericKeywords = .{},
+    has_references: bool = false,
+    has_const: bool = false,
+    has_enum: bool = false,
+    has_combinators: bool = false,
+    has_dependencies: bool = false,
     children: []const Child,
     patterns: []Pattern,
 
     pub fn keyword(self: *const Node, name: []const u8) ?*const jv.Node {
-        if (!draftDefinesKeyword(self.draft, name) or !keywordEnabled(self.vocabularies, name)) return null;
-        for (self.keywords) |item| if (std.mem.eql(u8, item.name, name)) return item.value;
+        var low: usize = 0;
+        var high = self.active_keywords.len;
+        while (low < high) {
+            const middle = low + (high - low) / 2;
+            const item = self.active_keywords[middle];
+            if (std.mem.lessThan(u8, item.name, name)) {
+                low = middle + 1;
+            } else if (std.mem.lessThan(u8, name, item.name)) {
+                high = middle;
+            } else {
+                return item.value;
+            }
+        }
         return null;
     }
 
     pub fn child(self: *const Node, keyword_name: []const u8, selector: ?[]const u8) ?*Node {
-        if (!draftDefinesKeyword(self.draft, keyword_name) or !keywordEnabled(self.vocabularies, keyword_name)) return null;
-        for (self.children) |item| {
-            if (!std.mem.eql(u8, item.keyword, keyword_name)) continue;
-            if (!sameOptional(item.selector, selector)) continue;
-            return item.node;
+        var low: usize = 0;
+        var high = self.children.len;
+        while (low < high) {
+            const middle = low + (high - low) / 2;
+            const item = self.children[middle];
+            switch (compareChild(item, keyword_name, selector)) {
+                .lt => low = middle + 1,
+                .gt => high = middle,
+                .eq => return item.node,
+            }
         }
         return null;
     }
@@ -70,6 +113,7 @@ const Anchor = struct { resource_uri: []const u8, name: []const u8, node: *Node,
 pub const Plan = struct {
     draft: Draft,
     root: *Node,
+    uses_dynamic_refs: bool = false,
     nodes: std.StringHashMapUnmanaged(*Node) = .empty,
     resources: std.ArrayListUnmanaged(Resource) = .empty,
     anchors: std.ArrayListUnmanaged(Anchor) = .empty,
@@ -144,8 +188,10 @@ const Builder = struct {
             try self.plan.resources.append(self.alloc, .{ .uri = baseWithoutFragment(base), .root = node });
 
         var keywords: std.ArrayListUnmanaged(Keyword) = .empty;
+        var active_keywords: std.ArrayListUnmanaged(Keyword) = .empty;
         var children: std.ArrayListUnmanaged(Child) = .empty;
         var patterns: std.ArrayListUnmanaged(Pattern) = .empty;
+        var numeric: NumericKeywords = .{};
         for (schema.value.object) |member| {
             const keyword_location = try appendPointer(self.alloc, location, member.key);
             try keywords.append(self.alloc, .{
@@ -154,6 +200,23 @@ const Builder = struct {
                 .location = keyword_location,
             });
             if (draftDefinesKeyword(self.draft, member.key) and keywordEnabled(self.vocabularies, member.key)) {
+                try active_keywords.append(self.alloc, .{
+                    .name = member.key,
+                    .value = member.value,
+                    .location = keyword_location,
+                });
+                if (std.mem.eql(u8, member.key, "$ref") or std.mem.eql(u8, member.key, "$dynamicRef") or std.mem.eql(u8, member.key, "$recursiveRef"))
+                    node.has_references = true;
+                if (std.mem.eql(u8, member.key, "const")) node.has_const = true;
+                if (std.mem.eql(u8, member.key, "enum")) node.has_enum = true;
+                if (std.mem.eql(u8, member.key, "allOf") or std.mem.eql(u8, member.key, "anyOf") or std.mem.eql(u8, member.key, "oneOf") or std.mem.eql(u8, member.key, "not") or std.mem.eql(u8, member.key, "if"))
+                    node.has_combinators = true;
+                if (std.mem.eql(u8, member.key, "dependencies") or std.mem.eql(u8, member.key, "dependentRequired") or std.mem.eql(u8, member.key, "dependentSchemas"))
+                    node.has_dependencies = true;
+                if (member.value.value == .number)
+                    numeric.set(member.key, try number.parse(self.alloc, member.value.value.number));
+                if (std.mem.eql(u8, member.key, "$dynamicRef") or std.mem.eql(u8, member.key, "$recursiveRef"))
+                    self.plan.uses_dynamic_refs = true;
                 if (std.mem.eql(u8, member.key, "pattern")) {
                     if (member.value.value == .string) {
                         const expression = try regex.compile(self.alloc, member.value.value.string);
@@ -168,7 +231,17 @@ const Builder = struct {
                 try self.compileChildren(member.key, member.value, keyword_location, base, &children);
             }
         }
+        var sort_index: usize = 1;
+        while (sort_index < active_keywords.items.len) : (sort_index += 1) {
+            var current = sort_index;
+            while (current > 0 and std.mem.lessThan(u8, active_keywords.items[current].name, active_keywords.items[current - 1].name)) : (current -= 1) {
+                std.mem.swap(Keyword, &active_keywords.items[current], &active_keywords.items[current - 1]);
+            }
+        }
         node.keywords = try keywords.toOwnedSlice(self.alloc);
+        node.active_keywords = try active_keywords.toOwnedSlice(self.alloc);
+        node.numeric = numeric;
+        std.mem.sort(Child, children.items, {}, childLessThan);
         node.children = try children.toOwnedSlice(self.alloc);
         node.patterns = try patterns.toOwnedSlice(self.alloc);
         try self.registerAnchors(node);
@@ -574,9 +647,18 @@ fn containsEmbeddedReference(node: *const jv.Node) bool {
     return false;
 }
 
-fn sameOptional(a: ?[]const u8, b: ?[]const u8) bool {
-    if (a == null or b == null) return a == null and b == null;
-    return std.mem.eql(u8, a.?, b.?);
+fn compareChild(item: Child, keyword_name: []const u8, selector: ?[]const u8) std.math.Order {
+    const keyword_order = std.mem.order(u8, item.keyword, keyword_name);
+    if (keyword_order != .eq) return keyword_order;
+    if (item.selector) |item_selector| {
+        if (selector) |target_selector| return std.mem.order(u8, item_selector, target_selector);
+        return .gt;
+    }
+    return if (selector == null) .eq else .lt;
+}
+
+fn childLessThan(_: void, a: Child, b: Child) bool {
+    return compareChild(a, b.keyword, b.selector) == .lt;
 }
 
 test "draft selection accepts supported HTTP and HTTPS identifiers" {
