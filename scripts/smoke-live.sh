@@ -6,6 +6,8 @@ WING=${WING:-"$ROOT/zig-out/bin/wing"}
 KITE=${KITE:-"$HOME/repos/kite/zig-out/bin/kite"}
 SR=${SCHEMA_REGISTRY_URL:-http://localhost:8081}
 BROKERS=${BOOTSTRAP_SERVERS:-localhost:9092}
+SR_CONTAINER=${SMOKE_SR_CONTAINER:-sr}
+JAVA_BOOTSTRAP_SERVERS=${JAVA_BOOTSTRAP_SERVERS:-kafka:29092}
 TRANSCRIPTS=${TRANSCRIPT_DIR:-"$HOME/wing-work/transcripts"}
 mkdir -p "$TRANSCRIPTS"
 TRANSCRIPT="$TRANSCRIPTS/phase3-live-$(date -u +%Y%m%dT%H%M%SZ).txt"
@@ -58,14 +60,14 @@ echo "Java serializer header and prefix formats"
 for topic in "$JAVA_HEADER" "$JAVA_PREFIX"; do
     printf '%s\n' "$SCHEMA" | "$WING" push "$topic" >/dev/null
     if [ "$topic" = "$JAVA_HEADER" ]; then
-        printf '%s\n' '{"id":4,"name":"java"}' | docker exec -i sr kafka-json-schema-console-producer \
-            --bootstrap-server kafka:29092 --topic "$topic" \
+        printf '%s\n' '{"id":4,"name":"java"}' | docker exec -i "$SR_CONTAINER" kafka-json-schema-console-producer \
+            --bootstrap-server "$JAVA_BOOTSTRAP_SERVERS" --topic "$topic" \
             --property "schema.registry.url=http://localhost:8081" \
             --property "value.schema=$SCHEMA" \
             --property value.schema.id.serializer=io.confluent.kafka.serializers.schema.id.HeaderSchemaIdSerializer >/dev/null
     else
-        printf '%s\n' '{"id":4,"name":"java"}' | docker exec -i sr kafka-json-schema-console-producer \
-            --bootstrap-server kafka:29092 --topic "$topic" \
+        printf '%s\n' '{"id":4,"name":"java"}' | docker exec -i "$SR_CONTAINER" kafka-json-schema-console-producer \
+            --bootstrap-server "$JAVA_BOOTSTRAP_SERVERS" --topic "$topic" \
             --property "schema.registry.url=http://localhost:8081" \
             --property "value.schema=$SCHEMA" >/dev/null
     fi
@@ -83,7 +85,7 @@ printf '%s\n' '{"topic":"'"$MIXED"'","value":"{\"id\":5}","headers":[]}' |
     "$KITE" produce --json "$MIXED"
 "$KITE" consume --from-beginning --max 2 --idle 2s --json "$MIXED" |
     "$WING" read | "$WING" write "$ORDERS" | "$KITE" produce --json "$ORDERS"
-docker exec sr kafka-json-schema-console-consumer --bootstrap-server kafka:29092 \
+docker exec "$SR_CONTAINER" kafka-json-schema-console-consumer --bootstrap-server "$JAVA_BOOTSTRAP_SERVERS" \
     --topic "$ORDERS" --from-beginning --max-messages 1 \
     --property schema.registry.url=http://localhost:8081 >/dev/null
 
