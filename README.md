@@ -258,6 +258,11 @@ kite consume --from-beginning --max 2 --idle 3s --json orders |
   wing read |
   jq -c .value
 
+# Filter with jq before decoding; the schema header survives (kite with _b64 support).
+kite consume --from-beginning --max 2 --idle 3s --json orders |
+  jq -c 'select(.partition == 0)' |
+  wing read
+
 # Route failed records from orders-bad into a dead-letter topic.
 kite consume --from-beginning --max 1 --idle 3s --json orders-bad |
   wing read --check |
@@ -324,8 +329,7 @@ skipped.
   array value uses its original JSON source text.
 - `read` decodes top-level `key_b64` / `value_b64` and array-header
   `value_b64` fields before handling payload prefixes and schema IDs; decoded
-  top-level fields do not pass through unchanged. `write` requires a JSON
-  value and rejects top-level `value_b64`.
+  top-level fields do not pass through unchanged.
 - `read` inlines a value only when its bytes are exactly one JSON object or
   array. Other values remain strings. It preserves record metadata and
   non-schema headers.

@@ -353,6 +353,21 @@ grep -Fq '"value":{}' "$TMP/read-offline-cache-guid-base64.out" &&
     cat "$TMP/read-offline-cache-guid-base64.out"
     exit 1
 }
+run_read_input_case read-key-b64-binary 2 nonempty "no __value_schema_id header or schema-id prefix" \
+    '{"key_b64":"gP8=","value":"{}"}' read
+grep -Fq '"key_b64":"gP8="' "$TMP/read-key-b64-binary.out" || {
+    echo "FAIL read-key-b64-binary: binary key was dropped or changed"
+    cat "$TMP/read-key-b64-binary.out"
+    exit 1
+}
+run_read_input_case read-key-b64-utf8 2 nonempty "no __value_schema_id header or schema-id prefix" \
+    '{"key_b64":"aGk=","value":"{}"}' read
+grep -Fq '"key":"hi"' "$TMP/read-key-b64-utf8.out" &&
+    ! grep -Fq 'key_b64' "$TMP/read-key-b64-utf8.out" || {
+    echo "FAIL read-key-b64-utf8: UTF-8 key was not rendered as a plain string"
+    cat "$TMP/read-key-b64-utf8.out"
+    exit 1
+}
 grep -Fq '"topic":"offline"' "$TMP/read-offline-cache-guid.out" || {
     echo "FAIL read-offline-cache-guid: schema metadata missing"
     cat "$TMP/read-offline-cache-guid.out"

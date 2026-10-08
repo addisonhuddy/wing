@@ -468,19 +468,34 @@ fn renderRecord(
     for (input.members) |member| {
         const name = member.key;
         if (std.mem.eql(u8, name, "schema")) continue;
-        if (std.mem.eql(u8, name, "value_b64") or std.mem.eql(u8, name, "key_b64")) continue;
+        if (std.mem.eql(u8, name, "value_b64")) continue;
         if (std.mem.eql(u8, name, "value")) {
             if (member.value != input.value or wrote_value) continue;
-            try writeFieldPrefix(&output.writer, alloc, &first, name);
-            try writePartValue(&output.writer, input.document, value);
+            try writePartValue(&output.writer, alloc, &first, input.document, value, "value", "value_b64");
             wrote_value = true;
         } else if (std.mem.eql(u8, name, "key")) {
             if (input.key == null or member.value != input.key.? or wrote_key) continue;
-            try writeFieldPrefix(&output.writer, alloc, &first, name);
             if (key) |part| {
-                try writePartValue(&output.writer, input.document, part);
-            } else {
+                try writePartValue(&output.writer, alloc, &first, input.document, part, "key", "key_b64");
+            } else if (member.value.value == .null_value) {
+                try writeFieldPrefix(&output.writer, alloc, &first, "key");
                 try output.writer.writeAll(record.raw(input.document, member.value));
+            } else {
+                try record.writeBytesField(
+                    &output.writer,
+                    &first,
+                    "key",
+                    "key_b64",
+                    try input.payloadBytes(alloc, member.value),
+                );
+            }
+            wrote_key = true;
+        } else if (std.mem.eql(u8, name, "key_b64")) {
+            if (input.key == null or member.value != input.key.? or wrote_key) continue;
+            if (key) |part| {
+                try writePartValue(&output.writer, alloc, &first, input.document, part, "key", "key_b64");
+            } else {
+                try record.writeBytesField(&output.writer, &first, "key", "key_b64", input.key_b64_bytes.?);
             }
             wrote_key = true;
         } else if (std.mem.eql(u8, name, "headers")) {
@@ -494,8 +509,7 @@ fn renderRecord(
         }
     }
     if (!wrote_value) {
-        try writeFieldPrefix(&output.writer, alloc, &first, "value");
-        try writePartValue(&output.writer, input.document, value);
+        try writePartValue(&output.writer, alloc, &first, input.document, value, "value", "value_b64");
     }
     if (input.headers_node != null and !wrote_headers) {
         try writeFieldPrefix(&output.writer, alloc, &first, "headers");
@@ -507,13 +521,25 @@ fn renderRecord(
     return output.written();
 }
 
-fn writePartValue(writer: *std.Io.Writer, document: jv.Document, part: PartResult) !void {
+fn writePartValue(
+    writer: *std.Io.Writer,
+    alloc: std.mem.Allocator,
+    first: *bool,
+    document: jv.Document,
+    part: PartResult,
+    plain_name: []const u8,
+    b64_name: []const u8,
+) !void {
     if (part.inline_value) {
+        try writeFieldPrefix(writer, alloc, first, plain_name);
         try writer.writeAll(part.payload);
-    } else if (part.source_was_string and !part.stripped_prefix and part.node != null) {
+    } else if (part.source_was_string and !part.stripped_prefix and part.node != null and
+        std.unicode.utf8ValidateSlice(part.payload))
+    {
+        try writeFieldPrefix(writer, alloc, first, plain_name);
         try writer.writeAll(record.raw(document, part.node.?));
     } else {
-        try record.writeString(writer, part.payload);
+        try record.writeBytesField(writer, first, plain_name, b64_name, part.payload);
     }
 }
 
@@ -529,8 +555,12 @@ fn writeFilteredHeaders(writer: *std.Io.Writer, input: record.Record) !void {
         } else {
             try writer.writeAll("{\"key\":");
             try record.writeString(writer, item.key);
-            try writer.writeAll(",\"value\":");
-            if (item.value) |bytes| try record.writeString(writer, bytes) else try writer.writeAll("null");
+            if (item.value) |bytes| {
+                var header_first = false;
+                try record.writeBytesField(writer, &header_first, "value", "value_b64", bytes);
+            } else {
+                try writer.writeAll(",\"value\":null");
+            }
             try writer.writeByte('}');
         }
     }

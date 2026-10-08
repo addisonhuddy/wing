@@ -139,7 +139,7 @@ PY
         "$WING" read <"$TMP/$form.jsonl" | jq -e --arg guid "$GUID" '.schema.value.guid == $guid' >/dev/null \
             || fail "raw header did not resolve"
         "$WING" write "$TOPIC:1" <"$TMP/$form.jsonl" >"$TMP/$form.out"
-python3 - "$GUID" "$TMP/$form.out" <<'PY'
+        python3 - "$GUID" "$TMP/$form.out" <<'PY'
 import base64
 import json
 import sys

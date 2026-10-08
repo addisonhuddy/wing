@@ -313,16 +313,14 @@ pub fn run(init: std.process.Init, global: cli.Global, args: []const []const u8)
         read_count += 1;
         _ = record_arena.reset(.retain_capacity);
         const line_alloc = record_arena.allocator();
-        const input_document = jv.parse(line_alloc, line) catch
-            fatalLine(global, line_number, "expected a JSON record; did you mean 'kite consume --json'?");
-        if (record.field(input_document.root, "value_b64") != null)
-            fatalLine(global, line_number, "value_b64 is not supported by wing write; values must be JSON");
         const input_record = record.Record.parse(line_alloc, line) catch
             fatalLine(global, line_number, "expected a JSON record; did you mean 'kite consume --json'?");
+        if (input_record.value_b64_bytes != null)
+            fatalLine(global, line_number, "value_b64 is not supported by wing write; values must be JSON");
 
         const value_bytes = try input_record.payloadBytes(line_alloc, input_record.value);
         if (value_bytes.len == 0) empty += 1;
-        var value_part: Part = .{ .payload = value_bytes, .source_string = input_record.value.value == .string and input_record.value_b64_bytes == null };
+        var value_part: Part = .{ .payload = value_bytes, .source_string = input_record.value.value == .string };
         var value_info: ?*Info = null;
         if (value_bytes.len > 0) {
             value_info = try selectValue(&resolver, reference, input_record, line_number);
@@ -411,7 +409,6 @@ pub fn run(init: std.process.Init, global: cli.Global, args: []const []const u8)
         } else {
             const needs_render = record.field(input_record.document.root, "schema") != null or
                 hasSchemaHeaders(input_record) or
-                input_record.value_b64_bytes != null or
                 input_record.key_b64_bytes != null or
                 (value_part.payload.len > 0 and value_info != null) or
                 (key_part != null and key_info != null) or
@@ -502,15 +499,18 @@ fn renderRecord(
             value_written = true;
         } else if (std.mem.eql(u8, member.key, "key")) {
             if (key) |part| {
-                if (part.changed) {
-                    try writeKeyBytes(&output.writer, &first, part.payload);
-                } else {
-                    try fieldPrefix(&output.writer, &first, "key");
-                    try output.writer.writeAll(record.raw(input.document, member.value));
-                }
-            } else {
+                try record.writeBytesField(&output.writer, &first, "key", "key_b64", part.payload);
+            } else if (member.value.value == .null_value) {
                 try fieldPrefix(&output.writer, &first, "key");
                 try output.writer.writeAll(record.raw(input.document, member.value));
+            } else {
+                try record.writeBytesField(
+                    &output.writer,
+                    &first,
+                    "key",
+                    "key_b64",
+                    try input.payloadBytes(alloc, member.value),
+                );
             }
             key_written = true;
         } else {
@@ -523,38 +523,25 @@ fn renderRecord(
         try writeValue(&output.writer, input.document, input.value, value);
     }
     if (input.key != null and !key_written) {
-        if (input.key_b64_bytes != null) {
-            try writeKeyBytes(
-                &output.writer,
-                &first,
-                if (key) |part| part.payload else input.key_b64_bytes.?,
-            );
-        } else if (key) |part| {
-            if (part.changed) {
-                try writeKeyBytes(&output.writer, &first, part.payload);
-            } else {
-                try fieldPrefix(&output.writer, &first, "key");
-                try output.writer.writeAll(record.raw(input.document, input.key.?));
-            }
-        } else {
+        if (input.key.?.value == .null_value) {
             try fieldPrefix(&output.writer, &first, "key");
             try output.writer.writeAll(record.raw(input.document, input.key.?));
+        } else if (key) |part| {
+            try record.writeBytesField(&output.writer, &first, "key", "key_b64", part.payload);
+        } else {
+            try record.writeBytesField(
+                &output.writer,
+                &first,
+                "key",
+                "key_b64",
+                try input.payloadBytes(alloc, input.key.?),
+            );
         }
     }
     try fieldPrefix(&output.writer, &first, "headers");
     try writeHeaders(&output.writer, input, value, key, value_info, key_info);
     try output.writer.writeByte('}');
     return output.written();
-}
-
-fn writeKeyBytes(writer: *std.Io.Writer, first: *bool, bytes: []const u8) !void {
-    if (std.unicode.utf8ValidateSlice(bytes)) {
-        try fieldPrefix(writer, first, "key");
-        try record.writeString(writer, bytes);
-    } else {
-        try fieldPrefix(writer, first, "key_b64");
-        try record.writeBase64String(writer, bytes);
-    }
 }
 
 fn writeValue(writer: *std.Io.Writer, document: jv.Document, original: *const jv.Node, part: Part) !void {
@@ -586,8 +573,12 @@ fn writeHeaders(
         }
         try writer.writeAll("{\"key\":");
         try record.writeString(writer, item.key);
-        try writer.writeAll(",\"value\":");
-        if (item.value) |bytes| try record.writeString(writer, bytes) else try writer.writeAll("null");
+        if (item.value) |bytes| {
+            var header_first = false;
+            try record.writeBytesField(writer, &header_first, "value", "value_b64", bytes);
+        } else {
+            try writer.writeAll(",\"value\":null");
+        }
         try writer.writeByte('}');
     }
     if (value.payload.len > 0) if (value_info) |info| {

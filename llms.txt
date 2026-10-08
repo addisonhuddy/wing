@@ -21,7 +21,7 @@ with kite, a Kafka CLI, using one JSON record per line.
   `write` requires `value`. Strings represent bytes; object/array values use
   their source JSON.
 - `wing read` decodes top-level `key_b64` / `value_b64` and array-header
-  `value_b64`; `wing write` requires a JSON `value`.
+  `value_b64`; decoded top-level fields do not pass through unchanged.
 - stdout is data and stderr is diagnostics. Validation pointers are plain JSON
   Pointers, with the root represented by the empty string.
 - Exit codes: `0` success; `1` usage/configuration/registry/tool failure;

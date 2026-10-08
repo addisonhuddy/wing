@@ -134,6 +134,25 @@ pub fn writeBase64String(writer: *std.Io.Writer, input_bytes: []const u8) !void 
     try writer.writeByte('"');
 }
 
+pub fn writeBytesField(
+    writer: *std.Io.Writer,
+    first: *bool,
+    plain_name: []const u8,
+    b64_name: []const u8,
+    input_bytes: []const u8,
+) !void {
+    const valid_utf8 = std.unicode.utf8ValidateSlice(input_bytes);
+    if (!first.*) try writer.writeByte(',');
+    first.* = false;
+    try writeString(writer, if (valid_utf8) plain_name else b64_name);
+    try writer.writeByte(':');
+    if (valid_utf8) {
+        try writeString(writer, input_bytes);
+    } else {
+        try writeBase64String(writer, input_bytes);
+    }
+}
+
 pub fn raw(document: jv.Document, node: *const jv.Node) []const u8 {
     return jv.sourceSlice(document, node);
 }
@@ -200,6 +219,17 @@ test "base64 JSON strings use standard padded encoding" {
     const header_bytes = [_]u8{ 1, 0x6d, 0xa3, 0x36, 0xd8, 0xf1, 0xd3, 0x0f, 0x98, 0x4c, 0x47, 0xd0, 0x3e, 0xe8, 0xa1, 0x4a, 0x12 };
     try writeBase64String(&output.writer, &header_bytes);
     try std.testing.expectEqualStrings("\"AW2jNtjx0w+YTEfQPuihShI=\"", output.written());
+}
+
+test "byte fields use plain UTF-8 or standard padded base64" {
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer output.deinit();
+    try output.writer.writeByte('{');
+    var first = true;
+    try writeBytesField(&output.writer, &first, "key", "key_b64", "é");
+    try writeBytesField(&output.writer, &first, "value", "value_b64", &.{ 0x80, 0xff });
+    try output.writer.writeByte('}');
+    try std.testing.expectEqualStrings("{\"key\":\"é\",\"value_b64\":\"gP8=\"}", output.written());
 }
 
 test "record string writer preserves high bytes and escapes controls" {
