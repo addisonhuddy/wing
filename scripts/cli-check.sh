@@ -16,6 +16,45 @@ run_case() {
     set +e
     (cd "$TMP/work" && env -u WING_CONFIG -u WING_TARGET -u SCHEMA_REGISTRY_URL \
         -u SCHEMA_REGISTRY_BASIC_AUTH_USER_INFO -u SCHEMA_REGISTRY_BEARER_AUTH_TOKEN \
+        HOME="$TMP/home" XDG_CONFIG_HOME="$TMP/xdg" "$BIN" "$@" </dev/null >"$out" 2>"$err")
+    status=$?
+    set -e
+    if [ "$status" -ne "$expected_status" ]; then
+        echo "FAIL $name: exit $status (want $expected_status)"
+        cat "$err"
+        return 1
+    fi
+    if [ "$expected_out" = nonempty ] && [ ! -s "$out" ]; then
+        echo "FAIL $name: stdout is empty"
+        return 1
+    elif [ "$expected_out" = empty ] && [ -s "$out" ]; then
+        echo "FAIL $name: stdout is not empty"
+        return 1
+    fi
+    if [ "$expected_err" = empty ] && [ -s "$err" ]; then
+        echo "FAIL $name: stderr is not empty"
+        cat "$err"
+        return 1
+    elif [ "$expected_err" != empty ] && ! grep -Fq "$expected_err" "$err"; then
+        echo "FAIL $name: stderr lacks '$expected_err'"
+        cat "$err"
+        return 1
+    fi
+    echo "PASS $name"
+}
+
+run_read_input_case() {
+    local name=$1 expected_status=$2 expected_out=$3 expected_err=$4 input=$5
+    shift 5
+    local workdir="$TMP/work"
+    if [ "${1:-}" = --workdir ]; then
+        workdir=$2
+        shift 2
+    fi
+    local out="$TMP/$name.out" err="$TMP/$name.err" status
+    set +e
+    printf '%s\n' "$input" | (cd "$workdir" && env -u WING_CONFIG -u WING_TARGET -u SCHEMA_REGISTRY_URL \
+        -u SCHEMA_REGISTRY_BASIC_AUTH_USER_INFO -u SCHEMA_REGISTRY_BEARER_AUTH_TOKEN \
         HOME="$TMP/home" XDG_CONFIG_HOME="$TMP/xdg" "$BIN" "$@" >"$out" 2>"$err")
     status=$?
     set -e
@@ -29,6 +68,10 @@ run_case() {
         return 1
     elif [ "$expected_out" = empty ] && [ -s "$out" ]; then
         echo "FAIL $name: stdout is not empty"
+        return 1
+    elif [ "$expected_out" = identical ] && ! printf '%s\n' "$input" | cmp -s - "$out"; then
+        echo "FAIL $name: stdout differs from input"
+        cat "$out"
         return 1
     fi
     if [ "$expected_err" = empty ] && [ -s "$err" ]; then
@@ -66,7 +109,14 @@ run_case missing-topic 1 empty "missing REF" get
 run_case missing-name 1 empty "missing NAME" registry set
 run_case update-bad-tag 1 empty "'main' is not a release tag (want e.g. v0.1.0)" update main
 run_case update-extra 1 empty "unexpected argument 'v2'" update v1 v2
-run_case read-stub 1 empty "not implemented yet" read
+run_case read-empty-input 0 empty "wing read: 0 read, 0 passed, 0 failed" read
+run_read_input_case read-missing-id 2 nonempty "no __value_schema_id header or schema-id prefix" \
+    '{"topic":"orders","value":"{}","headers":[]}' read
+run_read_input_case read-check-unchanged 2 identical "no __value_schema_id header or schema-id prefix" \
+    '{"topic":"orders","value":"{}","headers":[]}' read --check
+run_read_input_case read-malformed-record 1 empty "expected a JSON record" '{"value":' read
+run_read_input_case read-empty-value 0 nonempty "1 empty" \
+    '{"topic":"orders","value":"","headers":[]}' read
 run_case write-stub 1 empty "not implemented yet" write
 run_case push-stub 1 empty "not implemented yet" push
 run_case missing-registry-json 1 empty '"kind":"error","command":"ls"' --errors=json ls
@@ -130,7 +180,22 @@ done
 
 run_case bare-target 1 empty "bare '@' is not a registry name" @ ls
 run_case two-targets 1 empty "@local cannot be combined with @prod" @local @prod ls
-run_case read-stub-json 1 empty '"kind":"error","command":"read"' --errors=json read
+run_case read-empty-input-json 0 empty '"kind":"summary","read":0' --errors=json read
+
+mkdir -m 700 -p "$TMP/schema-cache"
+cat >"$TMP/schema-cache/11111111-1111-1111-1111-111111111111.json" <<'EOF'
+{"topic":"offline","version":1,"id":7,"guid":"11111111-1111-1111-1111-111111111111","compat":"BACKWARD","schema":"{\"type\":\"object\"}","references":null,"metadata":null,"ruleSet":null,"subject":"offline-value"}
+EOF
+chmod 600 "$TMP/schema-cache/11111111-1111-1111-1111-111111111111.json"
+mkdir -p "$TMP/cache-work"
+run_read_input_case read-offline-cache-guid 0 nonempty "1 read, 1 passed, 0 failed" \
+    '{"topic":"offline","value":"{}","headers":[{"key":"__value_schema_id","value":"\u0001\u0011\u0011\u0011\u0011\u0011\u0011\u0011\u0011\u0011\u0011\u0011\u0011\u0011\u0011\u0011\u0011"}]}' \
+    --workdir "$TMP/cache-work" --schema-dir "$TMP/schema-cache" read
+grep -Fq '"topic":"offline"' "$TMP/read-offline-cache-guid.out" || {
+    echo "FAIL read-offline-cache-guid: schema metadata missing"
+    cat "$TMP/read-offline-cache-guid.out"
+    exit 1
+}
 
 mkdir -p "$TMP/props"
 cat >"$TMP/props/wing.properties" <<'EOF'

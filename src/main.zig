@@ -44,7 +44,7 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
     if (std.mem.eql(u8, invocation.command, "ls")) try cmd_ls.run(init, invocation.global, invocation.args) else if (std.mem.eql(u8, invocation.command, "get")) try cmd_get.run(init, invocation.global, invocation.args) else if (std.mem.eql(u8, invocation.command, "rm")) try cmd_rm.run(init, invocation.global, invocation.args) else if (std.mem.eql(u8, invocation.command, "registry")) try cmd_registry.run(init, invocation.global, invocation.args) else if (std.mem.eql(u8, invocation.command, "read")) {
-        cmd_read.run(invocation.global);
+        try cmd_read.run(init, invocation.global, invocation.args);
     } else if (std.mem.eql(u8, invocation.command, "write")) {
         cmd_write.run(invocation.global);
     } else if (std.mem.eql(u8, invocation.command, "push")) {
