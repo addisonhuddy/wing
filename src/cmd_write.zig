@@ -821,9 +821,9 @@ fn emitErrorJson(line: usize, input: record.Record, value: []const validate.Fail
     std.debug.print(",\"output\":{{\"valid\":false,\"errors\":[", .{});
     var first = true;
     for (value) |failure| {
-        emitFailureJson(failure, &first);
+        app.emitValidationFailureJson(failure, &first);
     }
-    if (key) |part| for (part.failures) |failure| emitFailureJson(failure, &first);
+    if (key) |part| for (part.failures) |failure| app.emitValidationFailureJson(failure, &first);
     std.debug.print("]}}}}\n", .{});
 }
 
@@ -839,14 +839,6 @@ fn emitRecordPosition(input: record.Record) void {
         std.debug.print(",\"partition\":{s}", .{record.raw(input.document, partition)});
     if (record.field(input.document.root, "offset")) |offset|
         std.debug.print(",\"offset\":{s}", .{record.raw(input.document, offset)});
-}
-
-fn emitFailureJson(failure: validate.Failure, first: *bool) void {
-    if (!first.*) std.debug.print(",", .{});
-    first.* = false;
-    var output = std.Io.Writer.Allocating.init(std.heap.page_allocator);
-    std.json.Stringify.value(failure, .{}, &output.writer) catch {};
-    std.debug.print("{s}", .{output.written()});
 }
 
 fn writeLine(

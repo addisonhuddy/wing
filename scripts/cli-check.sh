@@ -86,6 +86,56 @@ run_read_input_case() {
     echo "PASS $name"
 }
 
+run_push_lint_case() {
+    local name=$1 input=$2 expected_location=$3 expected_message=$4 expected_text=$5 status
+    local text_out="$TMP/$name.text.out" text_err="$TMP/$name.text.err"
+    local json_out="$TMP/$name.json.out" json_err="$TMP/$name.json.err"
+    set +e
+    printf '%s\n' "$input" |
+        (cd "$TMP/work" && env -u WING_CONFIG -u WING_TARGET -u SCHEMA_REGISTRY_URL \
+            -u SCHEMA_REGISTRY_BASIC_AUTH_USER_INFO -u SCHEMA_REGISTRY_BEARER_AUTH_TOKEN \
+            HOME="$TMP/home" XDG_CONFIG_HOME="$TMP/xdg" "$BIN" push --check >"$text_out" 2>"$text_err")
+    status=$?
+    set -e
+    if [ "$status" -ne 2 ] || [ -s "$text_out" ]; then
+        echo "FAIL $name text mode: exit $status or stdout was unexpected"
+        cat "$text_err"
+        return 1
+    fi
+    printf '%s\n' "$expected_text" >"$TMP/$name.expected"
+    if ! cmp -s "$TMP/$name.expected" "$text_err"; then
+        echo "FAIL $name text mode changed"
+        diff -u "$TMP/$name.expected" "$text_err" || true
+        return 1
+    fi
+    echo "PASS $name-text-identical"
+
+    set +e
+    printf '%s\n' "$input" |
+        (cd "$TMP/work" && env -u WING_CONFIG -u WING_TARGET -u SCHEMA_REGISTRY_URL \
+            -u SCHEMA_REGISTRY_BASIC_AUTH_USER_INFO -u SCHEMA_REGISTRY_BEARER_AUTH_TOKEN \
+            HOME="$TMP/home" XDG_CONFIG_HOME="$TMP/xdg" "$BIN" push --check --errors=json \
+            >"$json_out" 2>"$json_err")
+    status=$?
+    set -e
+    if [ "$status" -ne 2 ] || [ -s "$json_out" ]; then
+        echo "FAIL $name JSON mode: exit $status or stdout was unexpected"
+        cat "$json_err"
+        return 1
+    fi
+    jq -s -e --arg location "$expected_location" --arg message "$expected_message" '
+        length > 0 and all(.[]; .command == "push" and .kind == "invalid" and
+            .output.valid == false and (.output.errors | length) == 1 and
+            .output.errors[0].instanceLocation == $location and
+            (.output.errors[0].error | contains($message)))
+    ' "$json_err" >/dev/null || {
+        echo "FAIL $name JSON diagnostics have the wrong envelope, location, or message"
+        cat "$json_err"
+        return 1
+    }
+    echo "PASS $name-json"
+}
+
 run_case root-help 0 nonempty empty --help
 run_case root-short-help 0 nonempty empty -h
 cmp -s "$TMP/root-help.out" "$TMP/root-short-help.out"
@@ -145,6 +195,59 @@ run_read_input_case read-empty-value 0 nonempty "1 empty" \
 run_read_input_case push-offline-check 0 empty empty '{"type":"object"}' push --check
 run_read_input_case push-typo-keyword 2 empty "wing push: unknown keyword 'typ' at the root (did you mean 'type'?)" \
     '{"typ":"object"}' push --check
+run_push_lint_case push-unknown-keyword '{"tpye":"object"}' "" "did you mean 'type'?" \
+    "wing push: unknown keyword 'tpye' at the root (did you mean 'type'?)"
+run_push_lint_case push-metaschema-enum '{"type":"objekt"}' "/type" "value is not in enum" \
+    "wing push: schema metaschema error at /properties/type/anyOf/0/\$ref -> /definitions/simpleTypes/enum: value is not in enum"
+mkdir -p "$TMP/push-fixtures/valid" "$TMP/push-fixtures/invalid"
+printf '%s\n' '{}' >"$TMP/push-fixtures/valid/missing-required.json"
+printf '%s\n' '{"x":1}' >"$TMP/push-fixtures/invalid/unexpected-valid.json"
+set +e
+printf '%s\n' '{"type":"object","required":["x"]}' |
+    (cd "$TMP/work" && env -u WING_CONFIG -u WING_TARGET -u SCHEMA_REGISTRY_URL \
+        -u SCHEMA_REGISTRY_BASIC_AUTH_USER_INFO -u SCHEMA_REGISTRY_BEARER_AUTH_TOKEN \
+        HOME="$TMP/home" XDG_CONFIG_HOME="$TMP/xdg" "$BIN" push --check \
+        --fixtures "$TMP/push-fixtures" >"$TMP/push-fixtures.text.out" 2>"$TMP/push-fixtures.text.err")
+status=$?
+set -e
+[ "$status" -eq 2 ] && [ ! -s "$TMP/push-fixtures.text.out" ] || {
+    echo "FAIL push-fixtures text mode: unexpected exit or stdout"
+    cat "$TMP/push-fixtures.text.err"
+    exit 1
+}
+printf '%s\n%s\n' \
+    "wing push: fixture valid/missing-required.json did not pass" \
+    "wing push: fixture invalid/unexpected-valid.json did not fail" >"$TMP/push-fixtures.expected"
+cmp -s "$TMP/push-fixtures.expected" "$TMP/push-fixtures.text.err" || {
+    echo "FAIL push-fixtures text mode changed"
+    diff -u "$TMP/push-fixtures.expected" "$TMP/push-fixtures.text.err" || true
+    exit 1
+}
+echo "PASS push-fixtures-text-identical"
+set +e
+printf '%s\n' '{"type":"object","required":["x"]}' |
+    (cd "$TMP/work" && env -u WING_CONFIG -u WING_TARGET -u SCHEMA_REGISTRY_URL \
+        -u SCHEMA_REGISTRY_BASIC_AUTH_USER_INFO -u SCHEMA_REGISTRY_BEARER_AUTH_TOKEN \
+        HOME="$TMP/home" XDG_CONFIG_HOME="$TMP/xdg" "$BIN" push --check \
+        --fixtures "$TMP/push-fixtures" --errors=json >"$TMP/push-fixtures.json.out" 2>"$TMP/push-fixtures.json.err")
+status=$?
+set -e
+[ "$status" -eq 2 ] && [ ! -s "$TMP/push-fixtures.json.out" ] || {
+    echo "FAIL push-fixtures JSON mode: unexpected exit or stdout"
+    cat "$TMP/push-fixtures.json.err"
+    exit 1
+}
+jq -s -e '
+    length == 2 and all(.[]; .command == "push" and .kind == "invalid" and
+        .output.valid == false and (.output.errors | length) == 1 and
+        .output.errors[0].instanceLocation == "" and
+        (.output.errors[0].error | contains("fixture")))
+' "$TMP/push-fixtures.json.err" >/dev/null || {
+    echo "FAIL push-fixtures JSON diagnostics are malformed"
+    cat "$TMP/push-fixtures.json.err"
+    exit 1
+}
+echo "PASS push-fixtures-json"
 run_read_input_case push-compat-check-rejected 1 empty "wing push: --compat cannot be combined with --check" \
     '{"type":"object"}' push --check --compat BACKWARD
 run_read_input_case write-empty-value 0 nonempty "1 written" \

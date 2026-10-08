@@ -77,7 +77,7 @@ pub fn run(init: std.process.Init, global: cli.Global, args: []const []const u8)
     };
 
     const allowed_refs = try referenceNames(alloc, envelope);
-    var lint_failed = try lintSchema(alloc, &plan, document, allowed_refs);
+    var lint_failed = try lintSchema(alloc, &plan, document, allowed_refs, global);
     const settings = app.settingsForCache(init, global, "push");
     var reg = app.registryFor(init, settings);
     var reference_resources: []const schema_compile.ResourceSource = &.{};
@@ -103,12 +103,12 @@ pub fn run(init: std.process.Init, global: cli.Global, args: []const []const u8)
                     pushStderr("schema cannot be compiled with --meta references: {s}", .{@errorName(err)});
                     std.process.exit(2);
                 };
-                lint_failed = (try lintSchema(alloc, &referenced_plan, document, allowed_refs)) or lint_failed;
+                lint_failed = (try lintSchema(alloc, &referenced_plan, document, allowed_refs, global)) or lint_failed;
             }
         }
     }
     if (options.fixtures) |directory|
-        lint_failed = (try checkFixtures(init, alloc, directory, &plan)) or lint_failed;
+        lint_failed = (try checkFixtures(init, alloc, directory, &plan, global)) or lint_failed;
     if (lint_failed) std.process.exit(2);
 
     if (options.topic == null) return;
@@ -232,19 +232,12 @@ fn compatibilityCheck(
             } else if (global.verbose or !isVerboseMetadata(raw)) {
                 raw_messages[raw_count] = raw;
                 raw_count += 1;
-                if (global.errors_json) {
-                    errors[error_count] = .{ .type = "UNKNOWN", .path = "", .description = raw };
-                    error_count += 1;
-                }
             }
         }
     } else if (registry_mod.objectValue(response, "message")) |message| {
         const raw = registry_mod.stringValue(message) orelse "incompatible schema";
         if (parseCompatibilityMessage(raw)) |parsed| {
             errors[error_count] = parsed;
-            error_count += 1;
-        } else if (global.errors_json) {
-            errors[error_count] = .{ .type = "UNKNOWN", .path = "", .description = raw };
             error_count += 1;
         } else {
             raw_messages[raw_count] = raw;
@@ -257,15 +250,21 @@ fn compatibilityCheck(
     else
         "latest";
     if (global.errors_json) {
-        var output = std.Io.Writer.Allocating.init(alloc);
-        try std.json.Stringify.value(.{
-            .kind = "incompatible",
-            .subject = subject,
-            .version = version,
-            .compatibility = compatibility,
-            .errors = errors[0..error_count],
-        }, .{}, &output.writer);
-        std.debug.print("{s}\n", .{output.written()});
+        var emitted = false;
+        for (errors[0..error_count]) |item| {
+            try pushFinding(alloc, global, item.path, "", "not compatible with {s} version {s} ({s}): {s}: {s}", .{
+                subject, version, compatibility, item.type, item.description,
+            });
+            emitted = true;
+        }
+        for (raw_messages[0..raw_count]) |raw| {
+            try pushFinding(alloc, global, "", "", "{s}", .{raw});
+            emitted = true;
+        }
+        if (!emitted)
+            try pushFinding(alloc, global, "", "", "not compatible with {s} version {s} ({s})", .{
+                subject, version, compatibility,
+            });
     } else {
         pushStderr("not compatible with {s} version {s} ({s}):", .{ subject, version, compatibility });
         for (errors[0..error_count]) |item|
@@ -385,6 +384,7 @@ fn lintSchema(
     plan: *const schema_compile.Plan,
     document: jv.Document,
     allowed_refs: []const []const u8,
+    global: cli.Global,
 ) !bool {
     var failed = false;
     var meta_source: ?[]const u8 = null;
@@ -407,13 +407,13 @@ fn lintSchema(
         });
         const failures = try validator.validate(alloc, &meta_plan, document.root, .{});
         for (failures) |failure| {
-            pushStderr("schema metaschema error at {s}: {s}", .{
+            try pushFinding(alloc, global, failure.instanceLocation, failure.keywordLocation, "schema metaschema error at {s}: {s}", .{
                 lintLocation(failure.keywordLocation), failure.@"error",
             });
             failed = true;
         }
     }
-    try lintNode(alloc, plan, plan.root, allowed_refs, &failed);
+    try lintNode(alloc, plan, plan.root, allowed_refs, &failed, global);
     return failed;
 }
 
@@ -423,16 +423,19 @@ fn lintNode(
     schema: *const schema_compile.Node,
     allowed_refs: []const []const u8,
     failed: *bool,
+    global: cli.Global,
 ) !void {
     if (schema.keyword("default")) |default_value| {
         const failures = try validator.validateSubschema(alloc, plan, schema, default_value, .{});
         for (failures) |failure| {
-            pushStderr("default at {s} is invalid: {s}", .{ lintLocation(schema.location), failure.@"error" });
+            try pushFinding(alloc, global, schema.location, failure.keywordLocation, "default at {s} is invalid: {s}", .{
+                lintLocation(schema.location), failure.@"error",
+            });
             failed.* = true;
         }
     }
     if (hasUnsatisfiableTypeEnum(schema.schema)) {
-        pushStderr("unsatisfiable type and enum at {s}", .{lintLocation(schema.location)});
+        try pushFinding(alloc, global, schema.location, "", "unsatisfiable type and enum at {s}", .{lintLocation(schema.location)});
         failed.* = true;
     }
     if (hasCombinatorAdditionalProperties(schema.schema, schema.draft)) {
@@ -440,7 +443,7 @@ fn lintNode(
             "use unevaluatedProperties or declare the properties at the top level"
         else
             "declare the properties at the top level";
-        pushStderr("additionalProperties:false with properties only inside a combinator at {s}; {s}", .{
+        try pushFinding(alloc, global, schema.location, "", "additionalProperties:false with properties only inside a combinator at {s}; {s}", .{
             lintLocation(schema.location), suggestion,
         });
         failed.* = true;
@@ -451,7 +454,7 @@ fn lintNode(
             if (std.mem.eql(u8, name, "$ref") and member.value.value == .string) {
                 const reference = member.value.value.string;
                 if (isLocalFileRef(reference) and !allowedReference(reference, allowed_refs)) {
-                    pushStderr("local-file $ref '{s}' at {s} does not resolve inside the schema; declare references via --meta", .{
+                    try pushFinding(alloc, global, schema.location, "", "local-file $ref '{s}' at {s} does not resolve inside the schema; declare references via --meta", .{
                         reference, lintLocation(schema.location),
                     });
                     failed.* = true;
@@ -459,16 +462,18 @@ fn lintNode(
             }
             if (knownKeyword(name) or annotationKeyword(name)) continue;
             if (nearestKeyword(name)) |candidate| {
-                pushStderr("unknown keyword '{s}' at {s} (did you mean '{s}'?)", .{
+                try pushFinding(alloc, global, schema.location, "", "unknown keyword '{s}' at {s} (did you mean '{s}'?)", .{
                     name, lintLocation(schema.location), candidate,
                 });
                 failed.* = true;
             } else {
-                pushStderr("warning: unknown keyword '{s}' at {s}", .{ name, lintLocation(schema.location) });
+                try pushNote(alloc, global, schema.location, "warning: unknown keyword '{s}' at {s}", .{
+                    name, lintLocation(schema.location),
+                });
             }
         }
     }
-    for (schema.children) |child| try lintNode(alloc, plan, child.node, allowed_refs, failed);
+    for (schema.children) |child| try lintNode(alloc, plan, child.node, allowed_refs, failed, global);
 }
 
 fn knownKeyword(name: []const u8) bool {
@@ -577,13 +582,12 @@ fn jvObjectField(node: *const jv.Node, name: []const u8) ?*const jv.Node {
     return null;
 }
 
-fn checkFixtures(init: std.process.Init, alloc: std.mem.Allocator, directory: []const u8, plan: *const schema_compile.Plan) !bool {
+fn checkFixtures(init: std.process.Init, alloc: std.mem.Allocator, directory: []const u8, plan: *const schema_compile.Plan, global: cli.Global) !bool {
     var failed = false;
     for ([_][]const u8{ "valid", "invalid" }) |category| {
         const path = try std.fs.path.join(alloc, &.{ directory, category });
         var dir = std.Io.Dir.cwd().openDir(init.io, path, .{ .iterate = true }) catch {
-            if (std.mem.eql(u8, category, "valid") or std.mem.eql(u8, category, "invalid"))
-                pushStderr("fixture directory '{s}' is missing", .{path});
+            try pushFinding(alloc, global, "", "", "fixture directory '{s}' is missing", .{path});
             failed = true;
             continue;
         };
@@ -593,14 +597,16 @@ fn checkFixtures(init: std.process.Init, alloc: std.mem.Allocator, directory: []
             if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".json")) continue;
             const source = try dir.readFileAlloc(init.io, entry.name, alloc, .limited(16 * 1024 * 1024));
             const document = jv.parse(alloc, source) catch {
-                pushStderr("fixture {s}/{s} is not valid JSON", .{ category, entry.name });
+                try pushFinding(alloc, global, "", "", "fixture {s}/{s} is not valid JSON", .{ category, entry.name });
                 failed = true;
                 continue;
             };
             const errors = try validator.validate(alloc, plan, document.root, .{});
             const expected_valid = std.mem.eql(u8, category, "valid");
             if ((errors.len == 0) != expected_valid) {
-                pushStderr("fixture {s}/{s} did not {s}", .{ category, entry.name, if (expected_valid) "pass" else "fail" });
+                try pushFinding(alloc, global, "", "", "fixture {s}/{s} did not {s}", .{
+                    category, entry.name, if (expected_valid) "pass" else "fail",
+                });
                 failed = true;
             }
         }
@@ -608,7 +614,56 @@ fn checkFixtures(init: std.process.Init, alloc: std.mem.Allocator, directory: []
     return failed;
 }
 
+fn pushFinding(
+    alloc: std.mem.Allocator,
+    global: cli.Global,
+    instance_location: []const u8,
+    keyword_location: []const u8,
+    comptime fmt: []const u8,
+    args: anytype,
+) !void {
+    const message = try std.fmt.allocPrint(alloc, fmt, args);
+    if (global.errors_json) {
+        std.debug.print("{{\"command\":\"push\",\"kind\":\"invalid\",\"output\":{{\"valid\":false,\"errors\":[", .{});
+        var first = true;
+        app.emitValidationFailureJson(.{
+            .instanceLocation = jsonPointer(instance_location),
+            .keywordLocation = jsonPointer(keyword_location),
+            .@"error" = message,
+        }, &first);
+        std.debug.print("]}}}}\n", .{});
+    } else {
+        pushStderr("{s}", .{message});
+    }
+}
+
+fn pushNote(
+    alloc: std.mem.Allocator,
+    global: cli.Global,
+    location: []const u8,
+    comptime fmt: []const u8,
+    args: anytype,
+) !void {
+    const message = try std.fmt.allocPrint(alloc, fmt, args);
+    if (global.errors_json) {
+        var output = std.Io.Writer.Allocating.init(alloc);
+        try std.json.Stringify.value(.{
+            .command = "push",
+            .kind = "note",
+            .location = jsonPointer(location),
+            .message = message,
+        }, .{}, &output.writer);
+        std.debug.print("{s}\n", .{output.written()});
+    } else {
+        pushStderr("{s}", .{message});
+    }
+}
+
+fn jsonPointer(location: []const u8) []const u8 {
+    return if (std.mem.startsWith(u8, location, "#")) location[1..] else location;
+}
+
 fn lintLocation(location: []const u8) []const u8 {
-    const pointer = if (std.mem.startsWith(u8, location, "#")) location[1..] else location;
+    const pointer = jsonPointer(location);
     return if (pointer.len == 0) "the root" else pointer;
 }

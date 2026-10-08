@@ -47,20 +47,19 @@ and [kite](https://github.com/addisonhuddy/kite) for Kafka record movement.
 
 You need Kafka at `localhost:9092`, Schema Registry at `localhost:8081`
 ([run both with Docker](#run-kafka-and-schema-registry-locally-with-docker)),
-`kite` and `jq` on `PATH`, and a fresh topic name. The schema and two sample
-records are in `examples/`.
+and `kite` and `jq` on `PATH`. The commands use a fresh topic named `orders`;
+the schema and two sample records are in `examples/`.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/addisonhuddy/wing/main/install.sh | sh
 curl -fsSL https://raw.githubusercontent.com/addisonhuddy/kite/main/install.sh | sh
 export BOOTSTRAP_SERVERS=localhost:9092
 export SCHEMA_REGISTRY_URL=http://localhost:8081
-TOPIC="${TOPIC:-orders}"
-wing push "$TOPIC" < examples/orders.schema.json
+wing push orders < examples/orders.schema.json
 jq -c '{value: .}' examples/orders.jsonl |
-  wing write "$TOPIC" |
-  kite produce --json "$TOPIC"
-kite consume --from-beginning --max 2 --idle 3s --json "$TOPIC" |
+  wing write orders |
+  kite produce --json orders
+kite consume --from-beginning --max 2 --idle 3s --json orders |
   wing read |
   jq -c .value
 # {"order_id":1,"customer":"Ada","total":12.5}
@@ -124,7 +123,7 @@ Use these facts when selecting or calling `wing`:
 - **Contract:** data on stdout, diagnostics on stderr; exit `0` success,
   `1` usage/configuration/Registry/tool failure, `2` invalid data/schema or
   failed check, `130` interrupt/termination. `--errors=json` requests
-  structured diagnostics; some `push` schema-lint findings remain plain text.
+  structured diagnostics.
   Commands do not prompt off-TTY; `rm` requires `-y`.
 - **Does not do:** Avro/Protobuf, remote `$ref`, application serialization,
   Kafka administration, or consumer-group management.
@@ -230,103 +229,76 @@ Use `@NAME` on a command to select a configured Registry.
 
 ## Examples
 
-These recipes use `TOPIC` from Quickstart (or set it to a fresh name), a
-configured Schema Registry, and kite on `PATH`. Registry-specific and
-legacy-serializer examples state their additional prerequisites in comments.
+These recipes use a configured Schema Registry and kite on `PATH`.
 
 ```sh
-TOPIC="${TOPIC:-orders}"
-
 # Lint and validate the valid/invalid fixture directories without registering.
 wing push --check --fixtures examples/fixtures < examples/orders.schema.json
 
-# Register a base schema, then confirm the Registry rejects a breaking change.
-COMPAT_TOPIC="${TOPIC}-compat"
-wing push "$COMPAT_TOPIC" --compat BACKWARD < examples/orders.schema.json
+# Register a base schema, then check backward compatibility.
+wing push orders-compat --compat BACKWARD < examples/orders.schema.json
+# exits 2 and prints the incompatible paths
 jq '.properties.order_id.type = "string"' examples/orders.schema.json |
-  wing push "$COMPAT_TOPIC" || [ "$?" -eq 2 ]
+  wing push orders-compat
 
 # Publish a key schema; --key addresses the <topic>-key subject.
-wing push "$TOPIC" --key < examples/orders-key.schema.json
+wing push orders --key < examples/orders-key.schema.json
 
 # Pin a schema version, then inspect its metadata envelope.
-wing get "$TOPIC:1" >/dev/null
-wing get "$TOPIC" --meta | jq '{topic,version,guid}'
+wing get orders:1
+wing get orders --meta | jq '{topic,version,guid}'
 
 # Copy schema metadata (including references) to another topic.
-COPY_TOPIC="${TOPIC}-copy"
-wing get "$TOPIC" --meta | wing push "$COPY_TOPIC" --meta
+wing get orders --meta | wing push orders-copy --meta
 
 # Consume and validate records, keeping only each decoded value.
-kite consume --from-beginning --max 2 --idle 3s --json "$TOPIC" |
+kite consume --from-beginning --max 2 --idle 3s --json orders |
   wing read |
   jq -c .value
 
-# Put a deliberately invalid record in a source topic, then route only failures
-# from wing read --check to a dead-letter topic.
-BAD_TOPIC="${TOPIC}-bad"
-DLQ_TOPIC="${TOPIC}-dlq"
-printf '%s\n' '{"value":{"order_id":3,"customer":"Eve","total":1}}' |
-  wing write "$TOPIC" |
-  sed 's/"total":1/"total":-1/' |
-  kite produce --json "$BAD_TOPIC"
-kite consume --from-beginning --max 1 --idle 3s --json "$BAD_TOPIC" |
+# Route failed records from orders-bad into a dead-letter topic.
+kite consume --from-beginning --max 1 --idle 3s --json orders-bad |
   wing read --check |
-  kite produce --json "$DLQ_TOPIC"
+  kite produce --json orders-dlq
 
 # CSV fields arrive as strings; --fit coerces them and applies currency's default.
-CSV_TOPIC="${TOPIC}-csv"
-kite produce --csv "$CSV_TOPIC" < examples/orders.csv
-kite consume --from-beginning --max 2 --idle 3s --json "$CSV_TOPIC" |
-  wing write "$TOPIC" --fit |
-  kite produce --json "$TOPIC"
+kite produce --csv orders-csv < examples/orders.csv
+kite consume --from-beginning --max 2 --idle 3s --json orders-csv |
+  wing write orders --fit |
+  kite produce --json orders
 
 # Keep a jq edit in the record pipeline; write validates the changed value.
-kite consume --from-beginning --max 2 --idle 3s --json "$TOPIC" |
+kite consume --from-beginning --max 2 --idle 3s --json orders |
   wing read |
   jq -c '.value.total += 1' |
-  wing write "$TOPIC" --fit |
-  kite produce --json "$TOPIC"
+  wing write orders --fit |
+  kite produce --json orders
 
-# Read a topic whose values were written by Confluent's Java JSON Schema serializer.
-LEGACY_TOPIC="${LEGACY_TOPIC:?set LEGACY_TOPIC to a Java-serializer topic}"
-kite consume --from-beginning --max 1 --idle 3s --json "$LEGACY_TOPIC" |
-  wing read |
-  jq -c .value
+# Records from Confluent's Java JSON Schema serializer (legacy 0x00 prefix or GUID header) read the same way.
+kite consume --from-beginning --max 1 --idle 3s --json legacy-orders | wing read
 
-# Publish a relative reference, then a root schema with Registry reference metadata.
-# wing get bundles registered references automatically; there is no --bundle flag.
-MONEY_TOPIC="${TOPIC}-money"
-INVOICE_TOPIC="${TOPIC}-invoice"
-MONEY_SCHEMA='{"$schema":"http://json-schema.org/draft-07/schema#","$id":"money.json","type":"object","properties":{"amount":{"type":"number"}},"required":["amount"]}'
-INVOICE_SCHEMA='{"$schema":"http://json-schema.org/draft-07/schema#","type":"object","properties":{"price":{"$ref":"money.json#/properties/amount"}},"required":["price"]}'
-printf '%s\n' "$MONEY_SCHEMA" | wing push "$MONEY_TOPIC" >/dev/null
-INVOICE_META=$(jq -cn --arg topic "$INVOICE_TOPIC" --arg schema "$INVOICE_SCHEMA" \
-  --arg subject "${MONEY_TOPIC}-value" \
-  '{topic:$topic,version:1,id:1,guid:"00000000-0000-0000-0000-000000000000",compat:"BACKWARD",schema:$schema,references:[{name:"money.json",subject:$subject,version:1}],metadata:null,ruleSet:null}')
-printf '%s\n' "$INVOICE_META" | wing push "$INVOICE_TOPIC" --meta
-wing get "$INVOICE_TOPIC" # bundled schema text on stdout
+# Register a relative reference; get bundles the referenced schema.
+wing push money < examples/money.schema.json
+wing push invoice --meta < examples/invoice.meta.json
+wing get invoice
 
-# Seed an offline cache, then read the same batch without Registry requests.
-CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/wing/schemas"
-BATCH=$(mktemp)
-kite consume --from-beginning --max 2 --idle 3s --json "$TOPIC" >"$BATCH"
-wing read --schema-dir "$CACHE_DIR" <"$BATCH" >/dev/null
-WING_DEBUG=1 wing read --schema-dir "$CACHE_DIR" <"$BATCH"
-rm -f "$BATCH"
+# Later reads with every GUID cached make no Registry requests.
+kite consume --from-beginning --max 2 --idle 3s --json orders > batch.jsonl
+wing read --schema-dir ~/.cache/wing/schemas < batch.jsonl
 
 # Requires prod to be configured in wing.yaml (see Multiple registries).
 wing ls @prod
 
-# Legacy @ version syntax returns a structured migration diagnostic.
-wing get "${TOPIC}@3" --errors=json || [ "$?" -eq 1 ]
+# Pipe structured schema diagnostics from stderr into jq.
+jq '{tpye: "object"}' examples/orders.schema.json |
+  wing push --check --errors=json 2>&1 >/dev/null |
+  jq -c .
 
 # Create then remove version 2; rm requires -y in a non-interactive pipeline.
-VERSION_TOPIC="${TOPIC}-versions"
-wing push "$VERSION_TOPIC" < examples/orders.schema.json >/dev/null
+wing push orders-versions < examples/orders.schema.json >/dev/null
 jq '.description = "temporary README example version"' examples/orders.schema.json |
-  wing push "$VERSION_TOPIC" >/dev/null
-wing rm "$VERSION_TOPIC:2" -y
+  wing push orders-versions >/dev/null
+wing rm orders-versions:2 -y
 ```
 
 ## REF syntax
@@ -358,8 +330,7 @@ subjects; a final positive integer after `:` pins a version.
   emits only failed or changed records. Both return `2` when a record needs
   attention; pipe read-check output to a DLQ producer.
 - `--errors=json` requests structured diagnostic lines on stderr. Validation
-  locations are plain JSON Pointers; the root is `""`. Some `push` schema
-  lint/meta-schema findings currently remain plain text.
+  locations are plain JSON Pointers; the root is `""`.
 - Per-record read/write errors, notes, and summaries start with
   `wing read:` or `wing write:`. Without an incoming schema field, write
   suggests passing a topic or preserving the schema field emitted by `read`.
@@ -484,7 +455,6 @@ docker network rm wing-local
 - **`wing get: 'orders@3': use 'orders:3' to pin a version ('@NAME' selects a registry)`:** use `:` for a version; `@` is reserved for registry selection.
 - **`Schema Registry at URL did not respond within 10s`:** the default response timeout is ten seconds; set `schema.registry.request.timeout.ms` or `SCHEMA_REGISTRY_REQUEST_TIMEOUT_MS`. This bounds the response wait, not DNS/TCP connect: Zig 0.16 `std.http` does not expose a usable connect timeout, so unreachable connects use the operating system timeout.
 - **`wing push: not compatible with orders-value version 1 (BACKWARD)`:** the Registry rejected the candidate schema; inspect the following path/reason lines, then choose a compatible schema or intentionally change the subject's compatibility policy.
-- **`wing push --check --errors=json` shows a plain schema-lint message:** push's schema/meta-schema lint findings are not yet encoded as JSON diagnostics; argument and Registry errors do support the JSON envelope.
 - **`connection refused by localhost:8081`:** start Schema Registry and confirm its host port and Kafka bootstrap listener match the Docker setup.
 
 ## Development and testing

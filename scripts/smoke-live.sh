@@ -172,12 +172,21 @@ python3 - "$TMP/compat.json" "$ORDERS" <<'PY'
 import json
 import sys
 with open(sys.argv[1]) as source:
-    result = json.loads(source.readline())
-assert result["kind"] == "incompatible"
-assert result["subject"] == sys.argv[2] + "-value"
-assert result["compatibility"] == "BACKWARD"
-assert result["errors"] and result["errors"][0]["type"] == "TYPE_CHANGED"
-assert result["errors"][0]["path"] == "/properties/id"
+    results = [json.loads(line) for line in source if line.strip()]
+assert results
+errors = []
+for result in results:
+    assert result["command"] == "push"
+    assert result["kind"] == "invalid"
+    assert result["output"]["valid"] is False
+    assert len(result["output"]["errors"]) == 1
+    errors.extend(result["output"]["errors"])
+assert any(
+    error["instanceLocation"] == "/properties/id"
+    and "TYPE_CHANGED" in error["error"]
+    and sys.argv[2] + "-value" in error["error"]
+    for error in errors
+)
 PY
 set +e
 {
