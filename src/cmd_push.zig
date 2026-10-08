@@ -1,6 +1,475 @@
+const std = @import("std");
 const cli = @import("cli.zig");
 const app = @import("app.zig");
+const registry_mod = @import("registry.zig");
+const schema_compile = @import("schema/compile.zig");
+const metaschemas = @import("schema/metaschemas.zig");
+const validator = @import("schema/validate.zig");
+const jv = @import("jv.zig");
 
-pub fn run(global: cli.Global) noreturn {
-    app.fatal("not implemented yet", global.errors_json, "push");
+const Options = struct {
+    topic: ?[]const u8 = null,
+    check: bool = false,
+    key: bool = false,
+    meta: bool = false,
+    fixtures: ?[]const u8 = null,
+    compatibility: ?[]const u8 = null,
+};
+
+pub fn run(init: std.process.Init, global: cli.Global, args: []const []const u8) !void {
+    const alloc = init.arena.allocator();
+    var options: Options = .{};
+    var index: usize = 0;
+    while (index < args.len) : (index += 1) {
+        const arg = args[index];
+        if (std.mem.eql(u8, arg, "--check")) {
+            options.check = true;
+        } else if (std.mem.eql(u8, arg, "--key")) {
+            options.key = true;
+        } else if (std.mem.eql(u8, arg, "--meta")) {
+            options.meta = true;
+        } else if (std.mem.eql(u8, arg, "--fixtures") and index + 1 < args.len) {
+            index += 1;
+            options.fixtures = args[index];
+        } else if (std.mem.eql(u8, arg, "--compat") and index + 1 < args.len) {
+            index += 1;
+            options.compatibility = args[index];
+        } else if (std.mem.startsWith(u8, arg, "-")) {
+            app.fatal(app.optionError(arg, &.{ "--check", "--key", "--meta", "--fixtures", "--compat" }) orelse "unexpected argument", global.errors_json, "push");
+        } else if (options.topic == null) {
+            options.topic = arg;
+        } else {
+            app.fatal("unexpected argument", global.errors_json, "push");
+        }
+    }
+    if (options.compatibility != null and options.check)
+        app.fatal("--compat cannot be combined with --check", global.errors_json, "push");
+
+    var stdin_buffer: [8192]u8 = undefined;
+    var stdin = std.Io.File.stdin().reader(init.io, &stdin_buffer);
+    const source = try stdin.interface.allocRemaining(alloc, .limited(16 * 1024 * 1024));
+    var envelope: ?std.json.Value = null;
+    const schema_text = if (options.meta) blk: {
+        envelope = std.json.parseFromSliceLeaky(std.json.Value, alloc, source, .{
+            .allocate = .alloc_always,
+            .parse_numbers = false,
+        }) catch app.fatal("invalid --meta envelope JSON", global.errors_json, "push");
+        const value = app.jsonField(envelope.?, "schema") orelse app.fatal("--meta envelope has no schema", global.errors_json, "push");
+        if (value != .string) app.fatal("--meta envelope schema must be a string", global.errors_json, "push");
+        break :blk value.string;
+    } else source;
+    const document = jv.parse(alloc, schema_text) catch app.fatal("schema is not valid JSON", global.errors_json, "push");
+    const plan = schema_compile.compile(alloc, document, .{}) catch |err| {
+        app.stderr("schema cannot be compiled: {s}", .{@errorName(err)});
+        std.process.exit(2);
+    };
+
+    const allowed_refs = try referenceNames(alloc, envelope);
+    var lint_failed = try lintSchema(alloc, &plan, document, allowed_refs);
+    const settings = app.settingsForCache(init, global, "push");
+    var reg = app.registryFor(init, settings);
+    var reference_resources: []const schema_compile.ResourceSource = &.{};
+    if (envelope) |meta_value| {
+        if (app.jsonField(meta_value, "references")) |references| {
+            if (references == .array and references.array.items.len > 0) {
+                if (settings.urls.len == 0) {
+                    app.stderr("missing referenced schemas; configure a registry before pushing --meta", .{});
+                    std.process.exit(1);
+                }
+                for (references.array.items) |reference| {
+                    const subject = app.textField(reference, "subject") orelse continue;
+                    const version_value = app.jsonField(reference, "version") orelse continue;
+                    const version = try registry_mod.valueText(alloc, version_value);
+                    _ = reg.schema(subject, version) catch {
+                        app.stderr("missing reference {s} version {s}", .{ subject, version });
+                        std.process.exit(1);
+                    };
+                }
+                reference_resources = reg.referenceResources(meta_value, settings.schema_dir) catch |err|
+                    app.fatal(allocFmt(alloc, "cannot resolve --meta references: {s}", .{@errorName(err)}), global.errors_json, "push");
+                const referenced_plan = schema_compile.compile(alloc, document, .{ .extra_resources = reference_resources }) catch |err| {
+                    app.stderr("schema cannot be compiled with --meta references: {s}", .{@errorName(err)});
+                    std.process.exit(2);
+                };
+                lint_failed = (try lintSchema(alloc, &referenced_plan, document, allowed_refs)) or lint_failed;
+            }
+        }
+    }
+    if (options.fixtures) |directory|
+        lint_failed = (try checkFixtures(init, alloc, directory, &plan)) or lint_failed;
+    if (lint_failed) std.process.exit(2);
+
+    if (options.topic == null) {
+        if (!options.check) app.fatal("missing TOPIC (or use --check for offline lint)", global.errors_json, "push");
+        return;
+    }
+    if (settings.urls.len == 0)
+        app.fatal("no Schema Registry configured; pass --registry URL, set SCHEMA_REGISTRY_URL, or run wing registry init", global.errors_json, "push");
+    const subject = try app.subjectForTopic(alloc, options.topic.?, options.key);
+    const reference_payload = if (envelope) |value| value else std.json.Value.null;
+    const registration = try requestValue(alloc, schema_text, reference_payload, options.meta);
+    const payload = try stringify(alloc, registration);
+    const escaped = try registry_mod.pathEscape(alloc, subject);
+    const compat_override = if (options.compatibility) |level|
+        try setCompatibility(alloc, &reg, escaped, level)
+    else
+        CompatState{};
+    if (!try compatibilityCheck(alloc, &reg, escaped, payload)) {
+        if (options.compatibility != null) restoreCompatibility(&reg, escaped, compat_override);
+        std.process.exit(2);
+    }
+    if (options.check) return;
+
+    if (reg.post(try std.fmt.allocPrint(alloc, "/subjects/{s}", .{escaped}), payload)) |existing_body| {
+        const existing = std.json.parseFromSliceLeaky(std.json.Value, alloc, existing_body, .{
+            .allocate = .alloc_always,
+            .parse_numbers = false,
+        }) catch .null;
+        if (registry_mod.stringValue(registry_mod.objectValue(existing, "guid") orelse .null)) |guid| {
+            const versions = reg.versions(subject) catch .null;
+            if (versions == .array) {
+                var latest_version: ?[]const u8 = null;
+                for (versions.array.items) |version_value| {
+                    const version = try registry_mod.valueText(alloc, version_value);
+                    const found = reg.schema(subject, version) catch continue;
+                    if (std.mem.eql(u8, registry_mod.stringValue(registry_mod.objectValue(found, "guid") orelse .null) orelse "", guid))
+                        latest_version = version;
+                }
+                if (latest_version) |version| {
+                    try writeGuid(init.io, guid);
+                    app.stderr("{s} version {s} already has this schema", .{ subject, version });
+                    return;
+                }
+            }
+        }
+    } else |_| {
+        if (reg.last_status != 404) app.commandError(&reg, error.RegistryFailure, global, "push");
+    }
+
+    const registered_body = reg.post(try std.fmt.allocPrint(alloc, "/subjects/{s}/versions", .{escaped}), payload) catch |err| {
+        if (options.compatibility != null) restoreCompatibility(&reg, escaped, compat_override);
+        app.commandError(&reg, err, global, "push");
+    };
+    const response = std.json.parseFromSliceLeaky(std.json.Value, alloc, registered_body, .{
+        .allocate = .alloc_always,
+        .parse_numbers = false,
+    }) catch app.fatal("invalid registration response", global.errors_json, "push");
+    const guid = app.textField(response, "guid") orelse app.fatal("registry returned no schema GUID", global.errors_json, "push");
+    try writeGuid(init.io, guid);
+    const versions = reg.versions(subject) catch .null;
+    const version = if (versions == .array) app.latestVersion(alloc, versions) else "latest";
+    app.stderr("registered {s} version {s}", .{ subject, version });
+}
+
+const CompatState = struct { had_override: bool = false, level: ?[]const u8 = null };
+
+fn setCompatibility(alloc: std.mem.Allocator, reg: *registry_mod.Registry, subject: []const u8, level: []const u8) !CompatState {
+    const path = try std.fmt.allocPrint(alloc, "/config/{s}", .{subject});
+    var state: CompatState = .{};
+    if (reg.get(path)) |body| {
+        const value = std.json.parseFromSliceLeaky(std.json.Value, alloc, body, .{ .allocate = .alloc_always }) catch .null;
+        state.had_override = true;
+        state.level = app.textField(value, "compatibilityLevel");
+    } else |_| {
+        if (reg.last_status != 404) app.commandError(reg, error.RegistryFailure, .{}, "push");
+    }
+    const request = try stringify(alloc, .{ .compatibility = level });
+    _ = reg.put(path, request) catch |err| app.commandError(reg, err, .{}, "push");
+    return state;
+}
+
+fn restoreCompatibility(reg: *registry_mod.Registry, subject: []const u8, state: CompatState) void {
+    const path = std.fmt.allocPrint(reg.alloc, "/config/{s}", .{subject}) catch return;
+    if (state.had_override) {
+        const level = state.level orelse return;
+        const body = std.fmt.allocPrint(reg.alloc, "{{\"compatibility\":\"{s}\"}}", .{level}) catch return;
+        _ = reg.put(path, body) catch app.stderr("could not restore compatibility for {s}", .{subject});
+    } else {
+        _ = reg.delete(path) catch app.stderr("could not remove temporary compatibility for {s}", .{subject});
+    }
+}
+
+fn compatibilityCheck(alloc: std.mem.Allocator, reg: *registry_mod.Registry, subject: []const u8, payload: []const u8) !bool {
+    const path = try std.fmt.allocPrint(alloc, "/compatibility/subjects/{s}/versions/latest?verbose=true", .{subject});
+    const body = reg.post(path, payload) catch |err| {
+        if (reg.last_status == 404) return true;
+        app.commandError(reg, err, .{}, "push");
+    };
+    const response = std.json.parseFromSliceLeaky(std.json.Value, alloc, body, .{ .allocate = .alloc_always }) catch return error.InvalidResponse;
+    const compatible = registry_mod.objectValue(response, "is_compatible");
+    if (compatible == null or compatible.? != .bool or compatible.?.bool) return true;
+    if (registry_mod.objectValue(response, "messages")) |messages| {
+        if (messages == .array) for (messages.array.items) |message| {
+            app.stderr("{s}", .{registry_mod.stringValue(message) orelse "incompatible schema"});
+        };
+    }
+    if (registry_mod.objectValue(response, "message")) |message|
+        app.stderr("{s}", .{registry_mod.stringValue(message) orelse "incompatible schema"});
+    return false;
+}
+
+fn requestValue(
+    alloc: std.mem.Allocator,
+    schema_text: []const u8,
+    envelope: std.json.Value,
+    meta: bool,
+) !std.json.Value {
+    var value = try std.json.parseFromSliceLeaky(std.json.Value, alloc, "{}", .{ .allocate = .alloc_always });
+    try value.object.put(alloc, "schemaType", .{ .string = "JSON" });
+    try value.object.put(alloc, "schema", .{ .string = schema_text });
+    if (meta) {
+        for ([_][]const u8{ "references", "metadata", "ruleSet" }) |name| {
+            if (app.jsonField(envelope, name)) |field| try value.object.put(alloc, name, field);
+        }
+    }
+    return value;
+}
+
+fn stringify(alloc: std.mem.Allocator, value: anytype) ![]const u8 {
+    var output = std.Io.Writer.Allocating.init(alloc);
+    try std.json.Stringify.value(value, .{}, &output.writer);
+    return output.written();
+}
+
+fn writeGuid(io: std.Io, guid: []const u8) !void {
+    var output = std.Io.Writer.Allocating.init(std.heap.page_allocator);
+    try output.writer.writeAll(guid);
+    try output.writer.writeByte('\n');
+    app.writeStdout(io, output.written(), false, "push");
+}
+
+fn allocFmt(alloc: std.mem.Allocator, comptime format: []const u8, args: anytype) []const u8 {
+    return std.fmt.allocPrint(alloc, format, args) catch "push failed";
+}
+
+fn referenceNames(alloc: std.mem.Allocator, envelope: ?std.json.Value) ![]const []const u8 {
+    var names: std.ArrayListUnmanaged([]const u8) = .empty;
+    if (envelope) |meta_value| {
+        if (app.jsonField(meta_value, "references")) |references| {
+            if (references == .array) for (references.array.items) |reference| {
+                if (app.textField(reference, "name")) |name| try names.append(alloc, name);
+            };
+        }
+    }
+    return names.toOwnedSlice(alloc);
+}
+
+fn lintSchema(
+    alloc: std.mem.Allocator,
+    plan: *const schema_compile.Plan,
+    document: jv.Document,
+    allowed_refs: []const []const u8,
+) !bool {
+    var failed = false;
+    var meta_source: ?[]const u8 = null;
+    for (metaschemas.entries) |entry| {
+        if (entry.draft == plan.draft and std.mem.endsWith(u8, entry.uri, "/schema")) {
+            meta_source = entry.source;
+            break;
+        }
+    }
+    if (meta_source) |source| {
+        const meta_document = try jv.parse(alloc, source);
+        var resources: std.ArrayListUnmanaged(schema_compile.ResourceSource) = .empty;
+        for (metaschemas.entries) |entry| {
+            const resource_document = try jv.parse(alloc, entry.source);
+            try resources.append(alloc, .{ .uri = entry.uri, .document = resource_document });
+        }
+        const meta_plan = try schema_compile.compile(alloc, meta_document, .{
+            .default_draft = plan.draft,
+            .extra_resources = resources.items,
+        });
+        const failures = try validator.validate(alloc, &meta_plan, document.root, .{});
+        for (failures) |failure| {
+            app.stderr("schema metaschema error {s}: {s}", .{ failure.keywordLocation, failure.@"error" });
+            failed = true;
+        }
+    }
+    try lintNode(alloc, plan, plan.root, allowed_refs, &failed);
+    return failed;
+}
+
+fn lintNode(
+    alloc: std.mem.Allocator,
+    plan: *const schema_compile.Plan,
+    schema: *const schema_compile.Node,
+    allowed_refs: []const []const u8,
+    failed: *bool,
+) !void {
+    if (schema.keyword("default")) |default_value| {
+        const failures = try validator.validateSubschema(alloc, plan, schema, default_value, .{});
+        for (failures) |failure| {
+            app.stderr("default at {s} is invalid: {s}", .{ schema.location, failure.@"error" });
+            failed.* = true;
+        }
+    }
+    if (hasUnsatisfiableTypeEnum(schema.schema)) {
+        app.stderr("unsatisfiable type and enum at {s}", .{schema.location});
+        failed.* = true;
+    }
+    if (hasCombinatorAdditionalProperties(schema.schema, schema.draft)) {
+        const suggestion = if (schema.draft == .draft2019_09 or schema.draft == .draft2020_12)
+            "use unevaluatedProperties or declare the properties at the top level"
+        else
+            "declare the properties at the top level";
+        app.stderr("additionalProperties:false with properties only inside a combinator at {s}; {s}", .{ schema.location, suggestion });
+        failed.* = true;
+    }
+    if (schema.schema.value == .object) {
+        for (schema.schema.value.object) |member| {
+            const name = member.key;
+            if (std.mem.eql(u8, name, "$ref") and member.value.value == .string) {
+                const reference = member.value.value.string;
+                if (isLocalFileRef(reference) and !allowedReference(reference, allowed_refs)) {
+                    app.stderr("local-file $ref '{s}' at {s} does not resolve inside the schema; declare references via --meta", .{ reference, schema.location });
+                    failed.* = true;
+                }
+            }
+            if (knownKeyword(name) or annotationKeyword(name)) continue;
+            if (nearestKeyword(name)) |candidate| {
+                app.stderr("unknown keyword '{s}' at {s} (did you mean '{s}'?)", .{ name, schema.location, candidate });
+                failed.* = true;
+            } else {
+                app.stderr("warning: unknown keyword '{s}' at {s}", .{ name, schema.location });
+            }
+        }
+    }
+    for (schema.children) |child| try lintNode(alloc, plan, child.node, allowed_refs, failed);
+}
+
+fn knownKeyword(name: []const u8) bool {
+    const names = [_][]const u8{
+        "$schema",           "$id",              "id",                    "$ref",            "$anchor",          "$dynamicAnchor", "$dynamicRef",       "$recursiveRef",        "$recursiveAnchor",
+        "$defs",             "definitions",      "type",                  "enum",            "const",            "title",          "description",       "default",              "examples",
+        "$comment",          "deprecated",       "readOnly",              "writeOnly",       "multipleOf",       "maximum",        "exclusiveMaximum",  "minimum",              "exclusiveMinimum",
+        "maxLength",         "minLength",        "pattern",               "additionalItems", "items",            "maxItems",       "minItems",          "uniqueItems",          "contains",
+        "maxContains",       "minContains",      "maxProperties",         "minProperties",   "required",         "properties",     "patternProperties", "additionalProperties", "dependencies",
+        "dependentRequired", "dependentSchemas", "propertyNames",         "if",              "then",             "else",           "allOf",             "anyOf",                "oneOf",
+        "not",               "unevaluatedItems", "unevaluatedProperties", "contentEncoding", "contentMediaType", "contentSchema",  "format",            "$vocabulary",
+    };
+    for (names) |candidate| if (std.mem.eql(u8, name, candidate)) return true;
+    return false;
+}
+
+fn annotationKeyword(name: []const u8) bool {
+    return std.mem.eql(u8, name, "title") or std.mem.eql(u8, name, "description") or
+        std.mem.eql(u8, name, "examples") or std.mem.eql(u8, name, "$comment") or
+        std.mem.eql(u8, name, "deprecated") or std.mem.eql(u8, name, "readOnly") or
+        std.mem.eql(u8, name, "writeOnly") or std.mem.startsWith(u8, name, "connect.") or
+        std.mem.startsWith(u8, name, "confluent:") or std.mem.startsWith(u8, name, "x-");
+}
+
+fn nearestKeyword(name: []const u8) ?[]const u8 {
+    var best: ?[]const u8 = null;
+    var distance: usize = 3;
+    const names = [_][]const u8{
+        "type",    "enum",    "const",            "required",         "properties", "additionalProperties", "items",     "allOf",     "anyOf", "oneOf",
+        "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf", "pattern",              "minLength", "maxLength",
+    };
+    for (names) |candidate| {
+        const current = editDistance(name, candidate);
+        if (current <= 2 and current < distance) {
+            distance = current;
+            best = candidate;
+        }
+    }
+    return best;
+}
+
+fn editDistance(a: []const u8, b: []const u8) usize {
+    if (a.len > 64 or b.len > 64) return 65;
+    var rows: [2][66]usize = undefined;
+    for (0..b.len + 1) |index| rows[0][index] = index;
+    for (1..a.len + 1) |i| {
+        rows[1][0] = i;
+        for (1..b.len + 1) |j| {
+            rows[1][j] = @min(@min(rows[0][j] + 1, rows[1][j - 1] + 1), rows[0][j - 1] + @intFromBool(a[i - 1] != b[j - 1]));
+        }
+        rows[0] = rows[1];
+    }
+    return rows[0][b.len];
+}
+
+fn isLocalFileRef(reference: []const u8) bool {
+    return !std.mem.startsWith(u8, reference, "#") and std.mem.indexOf(u8, reference, "://") == null and
+        (std.mem.endsWith(u8, reference, ".json") or std.mem.indexOf(u8, reference, ".json#") != null);
+}
+
+fn allowedReference(reference: []const u8, allowed: []const []const u8) bool {
+    for (allowed) |name| {
+        if (std.mem.startsWith(u8, reference, name) and
+            (reference.len == name.len or reference[name.len] == '#')) return true;
+    }
+    return false;
+}
+
+fn hasUnsatisfiableTypeEnum(schema: *const jv.Node) bool {
+    const type_node = jvObjectField(schema, "type") orelse return false;
+    const enum_node = jvObjectField(schema, "enum") orelse return false;
+    if (enum_node.value != .array or enum_node.value.array.len == 0) return true;
+    for (enum_node.value.array) |value| {
+        if (type_node.value == .string and typeMatches(type_node.value.string, value)) return false;
+        if (type_node.value == .array) {
+            for (type_node.value.array) |candidate|
+                if (candidate.value == .string and typeMatches(candidate.value.string, value)) return false;
+        }
+    }
+    return true;
+}
+
+fn typeMatches(name: []const u8, value: *const jv.Node) bool {
+    return if (std.mem.eql(u8, name, "null")) value.value == .null_value else if (std.mem.eql(u8, name, "boolean")) value.value == .boolean else if (std.mem.eql(u8, name, "object")) value.value == .object else if (std.mem.eql(u8, name, "array")) value.value == .array else if (std.mem.eql(u8, name, "string")) value.value == .string else if (std.mem.eql(u8, name, "number")) value.value == .number else if (std.mem.eql(u8, name, "integer")) value.value == .number and std.mem.indexOfAny(u8, value.value.number, ".eE") == null else false;
+}
+
+fn hasCombinatorAdditionalProperties(schema: *const jv.Node, draft: schema_compile.Draft) bool {
+    const additional = jvObjectField(schema, "additionalProperties") orelse return false;
+    if (additional.value != .boolean or additional.value.boolean) return false;
+    for ([_][]const u8{ "allOf", "anyOf", "oneOf" }) |name| {
+        const branches = jvObjectField(schema, name) orelse continue;
+        if (branches.value != .array) continue;
+        for (branches.value.array) |branch| {
+            if (jvObjectField(branch, "properties") != null) {
+                _ = draft;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+fn jvObjectField(node: *const jv.Node, name: []const u8) ?*const jv.Node {
+    if (node.value != .object) return null;
+    for (node.value.object) |member| if (std.mem.eql(u8, member.key, name)) return member.value;
+    return null;
+}
+
+fn checkFixtures(init: std.process.Init, alloc: std.mem.Allocator, directory: []const u8, plan: *const schema_compile.Plan) !bool {
+    var failed = false;
+    for ([_][]const u8{ "valid", "invalid" }) |category| {
+        const path = try std.fs.path.join(alloc, &.{ directory, category });
+        var dir = std.Io.Dir.cwd().openDir(init.io, path, .{ .iterate = true }) catch {
+            if (std.mem.eql(u8, category, "valid") or std.mem.eql(u8, category, "invalid"))
+                app.stderr("fixture directory '{s}' is missing", .{path});
+            failed = true;
+            continue;
+        };
+        defer dir.close(init.io);
+        var iterator = dir.iterate();
+        while (try iterator.next(init.io)) |entry| {
+            if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".json")) continue;
+            const source = try dir.readFileAlloc(init.io, entry.name, alloc, .limited(16 * 1024 * 1024));
+            const document = jv.parse(alloc, source) catch {
+                app.stderr("fixture {s}/{s} is not valid JSON", .{ category, entry.name });
+                failed = true;
+                continue;
+            };
+            const errors = try validator.validate(alloc, plan, document.root, .{});
+            const expected_valid = std.mem.eql(u8, category, "valid");
+            if ((errors.len == 0) != expected_valid) {
+                app.stderr("fixture {s}/{s} did not {s}", .{ category, entry.name, if (expected_valid) "pass" else "fail" });
+                failed = true;
+            }
+        }
+    }
+    return failed;
 }

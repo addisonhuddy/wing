@@ -49,6 +49,10 @@ pub const Registry = struct {
         return self.request(.POST, path, payload);
     }
 
+    pub fn put(self: *Registry, path: []const u8, payload: []const u8) ![]const u8 {
+        return self.request(.PUT, path, payload);
+    }
+
     pub fn delete(self: *Registry, path: []const u8) ![]const u8 {
         return self.request(.DELETE, path, null);
     }

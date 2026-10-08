@@ -7,6 +7,7 @@ const jv = @import("jv.zig");
 const header = @import("header.zig");
 const app = @import("app.zig");
 const schema_cache = @import("schema_cache.zig");
+const schema_compile = @import("schema/compile.zig");
 const fatal = app.fatal;
 const writeStdout = app.writeStdout;
 const has = app.has;
@@ -157,14 +158,23 @@ pub fn run(init: std.process.Init, global: cli.Global, args: []const []const u8)
             }
         }
     }
-    if (jsonField(schema, "references")) |references| {
-        if (references == .array and references.array.items.len > 0)
-            fatal("schema references are present but reference bundling is not implemented yet", global.errors_json, "get");
+    var bundled_schema: ?[]const u8 = null;
+    if (!meta) {
+        if (jsonField(schema, "references")) |references| {
+            if (references == .array and references.array.items.len > 0) {
+                const resources = if (cached)
+                    try schema_cache.referenceResources(io, alloc, settings.schema_dir.?, schema)
+                else
+                    reg.referenceResources(schema, settings.schema_dir) catch |err| commandError(&reg, err, global, "get");
+                bundled_schema = try bundleReferences(alloc, textField(schema, "schema") orelse fatal("registry response has no schema text", global.errors_json, "get"), resources);
+                app.stderr("bundled schema references; the bundled schema has a different GUID", .{});
+            }
+        }
     }
     if (meta) {
         try emitJson(alloc, io, metadata, global.errors_json, "get");
     } else {
-        const schema_text = textField(schema, "schema") orelse fatal("registry response has no schema text", global.errors_json, "get");
+        const schema_text = bundled_schema orelse textField(schema, "schema") orelse fatal("registry response has no schema text", global.errors_json, "get");
         const pretty = isTty(io, std.Io.File.stdout());
         if (pretty) {
             const parsed = jv.parse(alloc, schema_text) catch {
@@ -172,11 +182,197 @@ pub fn run(init: std.process.Init, global: cli.Global, args: []const []const u8)
                 return;
             };
             const formatted = try jv.pretty(alloc, parsed.root, term.colorEnabled(io, init.environ_map));
-            writeStdout(io, formatted, global.errors_json, "get");
-            writeStdout(io, "\n", global.errors_json, "get");
+            writeStdout(io, try std.fmt.allocPrint(alloc, "{s}\n", .{formatted}), global.errors_json, "get");
         } else {
-            writeStdout(io, schema_text, global.errors_json, "get");
-            writeStdout(io, "\n", global.errors_json, "get");
+            writeStdout(io, try std.fmt.allocPrint(alloc, "{s}\n", .{schema_text}), global.errors_json, "get");
         }
     }
+}
+
+fn bundleReferences(
+    alloc: std.mem.Allocator,
+    schema_text: []const u8,
+    resources: []const schema_compile.ResourceSource,
+) ![]const u8 {
+    const parsed = try jv.parse(alloc, schema_text);
+    const draft = try schema_compile.selectDraft(parsed.root, .{});
+    const defs_name: []const u8 = if (draft == .draft2019_09 or draft == .draft2020_12) "$defs" else "definitions";
+    var bundled = try std.json.parseFromSliceLeaky(std.json.Value, alloc, schema_text, .{
+        .allocate = .alloc_always,
+        .parse_numbers = false,
+    });
+    if (bundled != .object) return error.InvalidSchema;
+    const defs = if (bundled.object.get(defs_name)) |existing| blk: {
+        if (existing != .object) return error.InvalidSchema;
+        break :blk existing;
+    } else try std.json.parseFromSliceLeaky(std.json.Value, alloc, "{}", .{ .allocate = .alloc_always });
+
+    var mappings: std.StringHashMapUnmanaged([]const u8) = .empty;
+    var anchors: std.StringHashMapUnmanaged([]const u8) = .empty;
+    var def_object = defs.object;
+    for (resources, 0..) |resource, index| {
+        const key = try std.fmt.allocPrint(alloc, "wing_bundle_{d}", .{index});
+        try mappings.put(alloc, resource.uri, key);
+        try collectAnchors(alloc, resource.uri, resource.document.root, "", &anchors);
+        const value = try std.json.parseFromSliceLeaky(std.json.Value, alloc, resource.document.source, .{
+            .allocate = .alloc_always,
+            .parse_numbers = false,
+        });
+        try def_object.put(alloc, key, value);
+    }
+    try bundled.object.put(alloc, defs_name, .{ .object = def_object });
+    try rewriteBundledRefs(alloc, &bundled, defs_name, mappings, anchors);
+    var output = std.Io.Writer.Allocating.init(alloc);
+    try std.json.Stringify.value(bundled, .{}, &output.writer);
+    return output.written();
+}
+
+fn rewriteBundledRefs(
+    alloc: std.mem.Allocator,
+    value: *std.json.Value,
+    defs_name: []const u8,
+    mappings: std.StringHashMapUnmanaged([]const u8),
+    anchors: std.StringHashMapUnmanaged([]const u8),
+) anyerror!void {
+    switch (value.*) {
+        .object => {
+            if (value.object.getPtr("$ref")) |reference| {
+                if (reference.* == .string) {
+                    if (rewriteReference(alloc, reference.string, defs_name, mappings, anchors)) |rewritten|
+                        reference.* = .{ .string = rewritten };
+                }
+            }
+            var iterator = value.object.iterator();
+            while (iterator.next()) |entry| try rewriteBundledRefs(alloc, entry.value_ptr, defs_name, mappings, anchors);
+        },
+        .array => {
+            for (value.array.items) |*entry| try rewriteBundledRefs(alloc, entry, defs_name, mappings, anchors);
+        },
+        else => {},
+    }
+}
+
+fn rewriteReference(
+    alloc: std.mem.Allocator,
+    reference: []const u8,
+    defs_name: []const u8,
+    mappings: std.StringHashMapUnmanaged([]const u8),
+    anchors: std.StringHashMapUnmanaged([]const u8),
+) ?[]const u8 {
+    const hash = std.mem.indexOfScalar(u8, reference, '#');
+    const name = if (hash) |at| reference[0..at] else reference;
+    const definition = mappings.get(name) orelse return null;
+    const fragment = if (hash) |at| reference[at..] else "";
+    const suffix = if (fragment.len == 0)
+        ""
+    else if (std.mem.startsWith(u8, fragment, "#/"))
+        fragment[1..]
+    else blk: {
+        const anchor_name = std.fmt.allocPrint(alloc, "{s}{s}", .{ name, fragment }) catch return null;
+        break :blk anchors.get(anchor_name) orelse return null;
+    };
+    return std.fmt.allocPrint(alloc, "#/{s}/{s}{s}", .{ defs_name, definition, suffix }) catch null;
+}
+
+fn collectAnchors(
+    alloc: std.mem.Allocator,
+    resource_uri: []const u8,
+    node: *const jv.Node,
+    path: []const u8,
+    anchors: *std.StringHashMapUnmanaged([]const u8),
+) !void {
+    if (node.value != .object) return;
+    for ([_][]const u8{ "$anchor", "$dynamicAnchor" }) |key| {
+        if (nodeField(node, key)) |anchor| {
+            if (anchor.value == .string) try anchors.put(
+                alloc,
+                try std.fmt.allocPrint(alloc, "{s}#{s}", .{ resource_uri, anchor.value.string }),
+                path,
+            );
+        }
+    }
+    for (node.value.object) |member| {
+        if (std.mem.eql(u8, member.key, "properties") or std.mem.eql(u8, member.key, "patternProperties") or
+            std.mem.eql(u8, member.key, "$defs") or std.mem.eql(u8, member.key, "definitions") or
+            std.mem.eql(u8, member.key, "dependentSchemas") or std.mem.eql(u8, member.key, "dependencies"))
+        {
+            if (member.value.value != .object) continue;
+            for (member.value.value.object) |entry| {
+                const child_path = try std.fmt.allocPrint(alloc, "{s}/{s}/{s}", .{
+                    path,
+                    member.key,
+                    try pointerEscape(alloc, entry.key),
+                });
+                try collectAnchors(alloc, resource_uri, entry.value, child_path, anchors);
+            }
+        } else if (member.value.value == .array and schemaContainer(member.key)) {
+            for (member.value.value.array, 0..) |child, index| {
+                const child_path = try std.fmt.allocPrint(alloc, "{s}/{s}/{d}", .{ path, member.key, index });
+                try collectAnchors(alloc, resource_uri, child, child_path, anchors);
+            }
+        } else if (schemaContainer(member.key)) {
+            const child_path = try std.fmt.allocPrint(alloc, "{s}/{s}", .{ path, member.key });
+            try collectAnchors(alloc, resource_uri, member.value, child_path, anchors);
+        }
+    }
+}
+
+fn schemaContainer(name: []const u8) bool {
+    const names = [_][]const u8{ "properties", "patternProperties", "$defs", "definitions", "items", "prefixItems", "allOf", "anyOf", "oneOf", "not", "if", "then", "else", "additionalProperties", "contains" };
+    for (names) |candidate| if (std.mem.eql(u8, name, candidate)) return true;
+    return false;
+}
+
+fn nodeField(node: *const jv.Node, name: []const u8) ?*const jv.Node {
+    if (node.value != .object) return null;
+    for (node.value.object) |member| if (std.mem.eql(u8, member.key, name)) return member.value;
+    return null;
+}
+
+fn pointerEscape(alloc: std.mem.Allocator, text: []const u8) ![]const u8 {
+    var output: std.ArrayListUnmanaged(u8) = .empty;
+    for (text) |byte| switch (byte) {
+        '~' => try output.appendSlice(alloc, "~0"),
+        '/' => try output.appendSlice(alloc, "~1"),
+        else => try output.append(alloc, byte),
+    };
+    return output.toOwnedSlice(alloc);
+}
+
+test "get bundles named registry references under draft-specific definitions" {
+    const alloc = std.testing.allocator;
+    const referenced = try jv.parse(alloc, "{\"type\":\"string\"}");
+    const resources = [_]schema_compile.ResourceSource{.{
+        .uri = "common.json",
+        .document = referenced,
+    }};
+    const output = try bundleReferences(alloc, "{\"$ref\":\"common.json\"}", &resources);
+    try std.testing.expect(output.len > 0 and output[0] == '{');
+    try std.testing.expect(std.mem.indexOf(u8, output, "\"$ref\":\"#/definitions/wing_bundle_0\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "\"type\":\"string\"") != null);
+
+    const modern = try bundleReferences(alloc, "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"$ref\":\"common.json#/properties/name\"}", &resources);
+    try std.testing.expect(std.mem.indexOf(u8, modern, "\"$ref\":\"#/$defs/wing_bundle_0/properties/name\"") != null);
+}
+
+test "get rewrites named reference anchors to bundled pointers" {
+    const alloc = std.testing.allocator;
+    const referenced = try jv.parse(alloc, "{\"properties\":{\"name\":{\"$anchor\":\"name\",\"type\":\"string\"}}}");
+    const resources = [_]schema_compile.ResourceSource{.{ .uri = "common.json", .document = referenced }};
+    const output = try bundleReferences(alloc, "{\"$ref\":\"common.json#name\"}", &resources);
+    try std.testing.expect(std.mem.indexOf(u8, output, "\"$ref\":\"#/definitions/wing_bundle_0/properties/name\"") != null);
+}
+
+test "get emits valid JSON when bundling an absolute registry reference" {
+    const alloc = std.testing.allocator;
+    const referenced = try jv.parse(alloc, "{\"$id\":\"https://example.test/common.json\",\"type\":\"object\",\"properties\":{\"code\":{\"type\":\"string\"}},\"required\":[\"code\"]}");
+    const resources = [_]schema_compile.ResourceSource{.{ .uri = "https://example.test/common.json", .document = referenced }};
+    const output = try bundleReferences(
+        alloc,
+        "{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"$ref\":\"https://example.test/common.json\"}",
+        &resources,
+    );
+    try std.testing.expect(output.len > 0 and output[0] == '{');
+    _ = try jv.parse(alloc, output);
+    try std.testing.expect(std.mem.indexOf(u8, output, "\"$ref\":\"#/$defs/wing_bundle_0\"") != null);
 }
