@@ -7,6 +7,7 @@ pub const Settings = struct {
     bearer: ?[]const u8 = null,
     truststore: ?[]const u8 = null,
     insecure: bool = false,
+    request_timeout_ms: u64 = 10_000,
     extra_headers: []const []const u8 = &.{},
     schema_dir: ?[]const u8 = null,
     target: ?[]const u8 = null,
@@ -65,6 +66,7 @@ fn knownKey(key: []const u8) bool {
         "bearer.auth.token",
         "schema.registry.ssl.truststore.location",
         "schema.registry.ssl.insecure",
+        "schema.registry.request.timeout.ms",
         "schema.dir",
     };
     for (exact) |allowed| if (std.mem.eql(u8, key, allowed)) return true;
@@ -152,6 +154,7 @@ fn property(env: *std.process.Environ.Map, key: []const u8) ?[]const u8 {
     if (std.mem.eql(u8, key, "bearer.auth.token")) return envValue(env, "SCHEMA_REGISTRY_BEARER_AUTH_TOKEN");
     if (std.mem.eql(u8, key, "schema.registry.ssl.truststore.location")) return envValue(env, "SCHEMA_REGISTRY_SSL_TRUSTSTORE_LOCATION");
     if (std.mem.eql(u8, key, "schema.registry.ssl.insecure")) return envValue(env, "SCHEMA_REGISTRY_SSL_INSECURE");
+    if (std.mem.eql(u8, key, "schema.registry.request.timeout.ms")) return envValue(env, "SCHEMA_REGISTRY_REQUEST_TIMEOUT_MS");
     if (std.mem.eql(u8, key, "schema.dir")) return envValue(env, "WING_SCHEMA_DIR");
     return null;
 }
@@ -281,6 +284,7 @@ fn loadImpl(
         "bearer.auth.token",
         "schema.registry.ssl.truststore.location",
         "schema.registry.ssl.insecure",
+        "schema.registry.request.timeout.ms",
         "schema.dir",
     };
     var values: [keys.len]?[]const u8 = undefined;
@@ -329,7 +333,12 @@ fn loadImpl(
     s.bearer = values[2];
     s.truststore = values[3];
     s.insecure = if (values[4]) |v| std.ascii.eqlIgnoreCase(v, "true") else false;
-    s.schema_dir = global.schema_dir orelse values[5];
+    s.request_timeout_ms = if (values[5]) |v|
+        (std.fmt.parseInt(u64, v, 10) catch return error.InvalidRequestTimeout)
+    else
+        10_000;
+    if (s.request_timeout_ms == 0) return error.InvalidRequestTimeout;
+    s.schema_dir = global.schema_dir orelse values[6];
     var headers: std.ArrayListUnmanaged([]const u8) = .empty;
     var chosen = selected.iterator();
     while (chosen.next()) |entry| {

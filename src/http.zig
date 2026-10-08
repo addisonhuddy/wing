@@ -14,16 +14,38 @@ pub const Client = struct {
     bearer: ?[]const u8,
     headers: []const []const u8,
     debug: bool,
+    timeout_ms: u64 = 10_000,
     ca_bundle: ?[]const u8 = null,
     insecure: bool = false,
     last_url: ?[]const u8 = null,
+    last_registry_url: ?[]const u8 = null,
 
     pub fn request(self: *Client, method: std.http.Method, path: []const u8, payload: ?[]const u8) !Response {
         var last_err: anyerror = error.ConnectionFailed;
         for (self.bases) |base| {
             const url = try std.fmt.allocPrint(self.alloc, "{s}{s}", .{ std.mem.trimEnd(u8, base, "/"), path });
             self.last_url = url;
-            var client: std.http.Client = .{ .allocator = self.alloc, .io = self.io };
+            self.last_registry_url = base;
+            // Zig 0.16 std.http cannot bound connects; this deadline bounds the response.
+            var timeout_context: TimeoutContext = .{
+                .io = self.io,
+                .deadline = std.Io.Clock.Timestamp.fromNow(self.io, .{
+                    .clock = .awake,
+                    .raw = std.Io.Duration.fromNanoseconds(
+                        @as(i96, @intCast(self.timeout_ms)) * std.time.ns_per_ms,
+                    ),
+                }),
+            };
+            const previous_timeout_context = active_timeout_context;
+            active_timeout_context = &timeout_context;
+            defer active_timeout_context = previous_timeout_context;
+
+            var io_vtable = self.io.vtable.*;
+            io_vtable.netRead = timeoutNetRead;
+            var timed_io = self.io;
+            timed_io.vtable = &io_vtable;
+
+            var client: std.http.Client = .{ .allocator = self.alloc, .io = timed_io };
             defer client.deinit();
             try client.initDefaultProxies(self.alloc, self.env);
             if (self.ca_bundle) |ca_path| if (!self.insecure) {
@@ -66,6 +88,7 @@ pub const Client = struct {
             if (self.insecure and std.mem.startsWith(u8, base, "https://")) {
                 const proxy = if (noProxy(self.env, base)) null else client.https_proxy;
                 const result = insecureHttpsRequest(self, &client, url, method, extra.items, payload, proxy) catch |err| {
+                    if (timeout_context.expired) return error.Timeout;
                     last_err = err;
                     continue;
                 };
@@ -80,6 +103,7 @@ pub const Client = struct {
                 .extra_headers = extra.items,
                 .response_writer = &body.writer,
             }) catch |err| {
+                if (timeout_context.expired) return error.Timeout;
                 last_err = err;
                 continue;
             };
@@ -89,6 +113,40 @@ pub const Client = struct {
         return last_err;
     }
 };
+
+const TimeoutContext = struct {
+    io: std.Io,
+    deadline: std.Io.Clock.Timestamp,
+    expired: bool = false,
+};
+
+threadlocal var active_timeout_context: ?*TimeoutContext = null;
+
+fn timeoutNetRead(
+    userdata: ?*anyopaque,
+    src: std.Io.net.Socket.Handle,
+    data: [][]u8,
+) std.Io.net.Stream.Reader.Error!usize {
+    _ = userdata;
+    const context = active_timeout_context orelse return error.Unexpected;
+    if (data.len == 0 or data[0].len == 0) return 0;
+
+    const socket: std.Io.net.Socket = .{ .handle = src, .address = undefined };
+    const received = socket.receiveTimeout(context.io, data[0], .{ .deadline = context.deadline }) catch |err| {
+        if (err == error.Timeout) context.expired = true;
+        return switch (err) {
+            error.Timeout => error.Timeout,
+            error.Canceled => error.Canceled,
+            error.ConnectionResetByPeer => error.ConnectionResetByPeer,
+            error.SocketUnconnected => error.SocketUnconnected,
+            error.SystemResources => error.SystemResources,
+            error.NetworkDown => error.NetworkDown,
+            else => error.Unexpected,
+        };
+    };
+    if (received.data.len == 0) return 0;
+    return received.data.len;
+}
 
 fn insecureHttpsRequest(
     client: *Client,

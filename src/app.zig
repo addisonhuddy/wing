@@ -158,6 +158,8 @@ fn settingsForMode(init: std.process.Init, global: cli.Global, command: []const 
             "@NAME requires a config file with a registries section"
         else if (err == error.JavaTruststore)
             "Java truststores (.jks/.p12) are not supported; configure a PEM CA bundle"
+        else if (err == error.InvalidRequestTimeout)
+            "schema.registry.request.timeout.ms must be a positive integer"
         else
             @errorName(err);
         fatal(message, global.errors_json, command);
@@ -180,6 +182,7 @@ fn settingsForMode(init: std.process.Init, global: cli.Global, command: []const 
             "SCHEMA_REGISTRY_BEARER_AUTH_TOKEN",
             "SCHEMA_REGISTRY_SSL_TRUSTSTORE_LOCATION",
             "SCHEMA_REGISTRY_SSL_INSECURE",
+            "SCHEMA_REGISTRY_REQUEST_TIMEOUT_MS",
             "WING_SCHEMA_DIR",
             "WING_TARGET",
         };

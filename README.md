@@ -273,6 +273,7 @@ override environment, file defaults, and built-ins.
 | `bearer.auth.token` | `SCHEMA_REGISTRY_BEARER_AUTH_TOKEN` | Bearer token authentication. |
 | `schema.registry.ssl.truststore.location` | `SCHEMA_REGISTRY_SSL_TRUSTSTORE_LOCATION` | PEM CA bundle. |
 | `schema.registry.ssl.insecure` | `SCHEMA_REGISTRY_SSL_INSECURE` | Disable TLS verification; emits a warning. |
+| `schema.registry.request.timeout.ms` | `SCHEMA_REGISTRY_REQUEST_TIMEOUT_MS` | Registry response timeout in milliseconds; defaults to `10000`. |
 | `schema.dir` | `WING_SCHEMA_DIR` | Offline schema cache directory. |
 | `http.header.NAME` | — | Additional HTTP request header. |
 

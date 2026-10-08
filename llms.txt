@@ -23,6 +23,9 @@ with kite, a Kafka CLI, using one JSON record per line.
   `2` invalid records/schema or failed checks; `130` SIGINT/SIGTERM.
 - Configure via `--registry`, `SCHEMA_REGISTRY_URL`, or `wing.yaml`.
   `@NAME` selects a named registry for one invocation.
+- Registry responses time out after 10 seconds by default; configure
+  `schema.registry.request.timeout.ms` or
+  `SCHEMA_REGISTRY_REQUEST_TIMEOUT_MS` to change the timeout in milliseconds.
 - `--errors=json` writes structured diagnostic lines to stderr; `-q` suppresses
   summaries; `-v` adds provenance and fitting changes.
 - Per-record diagnostics, notes, and summaries are prefixed `wing read:` or

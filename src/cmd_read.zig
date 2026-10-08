@@ -75,7 +75,7 @@ const Resolver = struct {
                         recordFatal(self.global, self.alloc, line_number, "{s}", .{self.registry.last_error orelse @errorName(err)});
                     };
                 }
-                if (self.settings.urls.len > 0) {
+                if (!was_cached and self.settings.urls.len > 0) {
                     const location = self.registry.guidLocation(text, key, topic) catch |err| {
                         if (self.registry.last_status == 404)
                             recordFatal(self.global, self.alloc, line_number, "schema GUID {s} not found in {s}", .{

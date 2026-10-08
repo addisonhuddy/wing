@@ -4,7 +4,7 @@ cd "$(dirname "$0")/.."
 
 BIN=$(realpath "${1:-zig-out/bin/wing}")
 TMP=$(mktemp -d)
-trap 'rm -rf "$TMP"' EXIT
+trap 'if [ -n "${TIMEOUT_SERVER_PID:-}" ]; then kill "$TIMEOUT_SERVER_PID" 2>/dev/null || true; fi; rm -rf "$TMP"' EXIT
 
 [ -x "$BIN" ] || { echo "run zig build first" >&2; exit 1; }
 mkdir -p "$TMP/home" "$TMP/xdg" "$TMP/work"
@@ -238,6 +238,22 @@ grep -Fq '"topic":"offline"' "$TMP/read-offline-cache-guid.out" || {
     cat "$TMP/read-offline-cache-guid.out"
     exit 1
 }
+set +e
+printf '%s\n' '{"topic":"offline","value":"{}","headers":[{"key":"__value_schema_id","value":"\u0001\u0011\u0011\u0011\u0011\u0011\u0011\u0011\u0011\u0011\u0011\u0011\u0011\u0011\u0011\u0011\u0011"}]}' |
+    (cd "$TMP/cache-work" && env -u WING_CONFIG -u WING_TARGET \
+        -u SCHEMA_REGISTRY_BASIC_AUTH_USER_INFO -u SCHEMA_REGISTRY_BEARER_AUTH_TOKEN \
+        HOME="$TMP/home" XDG_CONFIG_HOME="$TMP/xdg" \
+        SCHEMA_REGISTRY_URL=http://127.0.0.1:9 WING_DEBUG=1 \
+        "$BIN" --schema-dir "$TMP/schema-cache" read \
+        >"$TMP/read-cached-no-request.out" 2>"$TMP/read-cached-no-request.err")
+status=$?
+set -e
+[ "$status" -eq 0 ] && ! grep -Fq "WING_DEBUG request " "$TMP/read-cached-no-request.err" || {
+    echo "FAIL read-cached-no-request: cached read contacted Schema Registry"
+    cat "$TMP/read-cached-no-request.err"
+    exit 1
+}
+echo "PASS read-cached-no-request"
 
 run_read_input_case write-offline-cache-guid 0 nonempty "1 written" \
     '{"value":"{}","headers":[{"key":"custom","value":"one"},{"key":"__value_schema_id","value":"stale"}],"schema":{"value":{"guid":"11111111-1111-1111-1111-111111111111"}}}' \
@@ -365,6 +381,50 @@ import sys
 assert any(byte >= 0x80 for byte in open(sys.argv[1], "rb").read())
 PY
 echo "PASS tty JSON coloring preserves pipe bytes"
+
+mkdir -p "$TMP/timeout-config"
+python3 - "$TMP/timeout-port" >"$TMP/timeout-server.log" 2>&1 <<'PY' &
+import socket
+import sys
+import time
+
+server = socket.socket()
+server.bind(("127.0.0.1", 0))
+server.listen(1)
+with open(sys.argv[1], "w") as port_file:
+    port_file.write(str(server.getsockname()[1]))
+connection, _ = server.accept()
+time.sleep(3)
+connection.close()
+server.close()
+PY
+TIMEOUT_SERVER_PID=$!
+for _ in $(seq 1 100); do
+    [ -s "$TMP/timeout-port" ] && break
+    sleep 0.02
+done
+[ -s "$TMP/timeout-port" ] || {
+    echo "FAIL registry-request-timeout: test server did not start"
+    cat "$TMP/timeout-server.log"
+    exit 1
+}
+cat >"$TMP/timeout-config/wing.properties" <<EOF
+schema.registry.url=http://127.0.0.1:$(cat "$TMP/timeout-port")
+schema.registry.request.timeout.ms=250
+EOF
+set +e
+(cd "$TMP/work" && env -u WING_TARGET -u SCHEMA_REGISTRY_URL \
+    HOME="$TMP/home" XDG_CONFIG_HOME="$TMP/xdg" \
+    "$BIN" --config "$TMP/timeout-config/wing.properties" ls \
+    >"$TMP/registry-timeout.out" 2>"$TMP/registry-timeout.err")
+status=$?
+set -e
+[ "$status" -eq 1 ] && grep -Fq "did not respond within 250ms" "$TMP/registry-timeout.err" || {
+    echo "FAIL registry-request-timeout: exit $status or timeout diagnostic was wrong"
+    cat "$TMP/registry-timeout.err"
+    exit 1
+}
+echo "PASS registry-request-timeout"
 
 mkdir -p "$TMP/props"
 cat >"$TMP/props/wing.properties" <<'EOF'

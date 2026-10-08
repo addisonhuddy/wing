@@ -79,6 +79,7 @@ pub const Registry = struct {
                 .bearer = settings.bearer,
                 .headers = settings.extra_headers,
                 .debug = if (env.get("WING_DEBUG")) |v| std.mem.eql(u8, v, "1") else false,
+                .timeout_ms = settings.request_timeout_ms,
                 .ca_bundle = settings.truststore,
                 .insecure = settings.insecure,
             },
@@ -104,10 +105,22 @@ pub const Registry = struct {
     fn request(self: *Registry, method: std.http.Method, path: []const u8, payload: ?[]const u8) ![]const u8 {
         const response = self.client.request(method, path, payload) catch |err| {
             self.last_status = 0;
-            self.last_error = try std.fmt.allocPrint(self.alloc, "cannot reach Schema Registry at {s}: {s}", .{
-                self.client.last_url orelse "configured URL",
-                try errorText(self.alloc, @errorName(err)),
-            });
+            if (err == error.Timeout) {
+                const timeout = if (self.client.timeout_ms % 1000 == 0)
+                    try std.fmt.allocPrint(self.alloc, "{d}s", .{self.client.timeout_ms / 1000})
+                else
+                    try std.fmt.allocPrint(self.alloc, "{d}ms", .{self.client.timeout_ms});
+                self.last_error = try std.fmt.allocPrint(
+                    self.alloc,
+                    "Schema Registry at {s} did not respond within {s}",
+                    .{ self.client.last_registry_url orelse "configured URL", timeout },
+                );
+            } else {
+                self.last_error = try std.fmt.allocPrint(self.alloc, "cannot reach Schema Registry at {s}: {s}", .{
+                    self.client.last_url orelse "configured URL",
+                    try errorText(self.alloc, @errorName(err)),
+                });
+            }
             return err;
         };
         self.last_status = response.status;
