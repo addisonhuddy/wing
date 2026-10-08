@@ -258,10 +258,9 @@ kite consume --from-beginning --max 2 --idle 3s --json orders |
   wing read |
   jq -c .value
 
-# Filter with jq before decoding; the schema header survives (kite with _b64 support).
-kite consume --from-beginning --max 2 --idle 3s --json orders |
-  jq -c 'select(.partition == 0)' |
-  wing read
+# Save raw records now; filter with jq and decode later (the schema header survives jq).
+kite consume --from-beginning --max 2 --idle 3s --json orders > orders.jsonl
+jq -c 'select(.key == null)' orders.jsonl | wing read
 
 # Route failed records from orders-bad into a dead-letter topic.
 kite consume --from-beginning --max 1 --idle 3s --json orders-bad |
