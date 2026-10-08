@@ -1,0 +1,49 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": ["id", "createdAt", "amount", "customer", "tags", "payload"],
+  "properties": {
+    "id": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "amount": {
+      "type": "number",
+      "minimum": 0,
+      "multipleOf": 0.01
+    },
+    "customer": {
+      "type": "object",
+      "required": ["id", "country"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[A-Z0-9]{8}$"
+        },
+        "country": {
+          "type": "string",
+          "pattern": "^[A-Z]{2}$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "tags": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "maxItems": 8
+    },
+    "payload": {
+      "type": "string",
+      "minLength": 700,
+      "maxLength": 900
+    }
+  },
+  "additionalProperties": false
+}

@@ -9,12 +9,19 @@ const cmd_update = @import("cmd_update.zig");
 const cmd_read = @import("cmd_read.zig");
 const cmd_write = @import("cmd_write.zig");
 const cmd_push = @import("cmd_push.zig");
+const cmd_validate = @import("cmd_validate.zig");
 
 pub const panic = std.debug.simple_panic;
 
 pub fn main(init: std.process.Init) !void {
     const alloc = init.arena.allocator();
     const argv = try init.minimal.args.toSlice(alloc);
+    if (argv.len > 1 and std.mem.eql(u8, argv[1], "_validate")) {
+        try cmd_validate.validateCommand(init, argv[2..]);
+    }
+    if (argv.len > 1 and std.mem.eql(u8, argv[1], "_jsts")) {
+        try cmd_validate.jstsCommand(init, argv[2..]);
+    }
     if (argv.len == 2 and (std.mem.eql(u8, argv[1], "-V") or std.mem.eql(u8, argv[1], "--version"))) {
         app.writeStdout(init.io, "wing " ++ cli.version ++ "\n", false, "");
         return;
