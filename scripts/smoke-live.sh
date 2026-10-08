@@ -18,6 +18,8 @@ export SCHEMA_REGISTRY_URL=$SR BOOTSTRAP_SERVERS=$BROKERS
 command -v jq >/dev/null
 command -v docker >/dev/null
 [ -x "$WING" ] || { echo "missing wing binary: $WING"; exit 1; }
+WING_TESTKIT=${WING_TESTKIT:-"$ROOT/zig-out/bin/wing-testkit"}
+[ -x "$WING_TESTKIT" ] || (cd "$ROOT" && zig build testkit)
 [ -x "$KITE" ] || { echo "missing kite binary: $KITE"; exit 1; }
 curl -fsS "$SR/subjects" >/dev/null
 
@@ -118,10 +120,10 @@ jq -r .guid <<<"$ENVELOPE" >"$TMP/original.guid"
 "$WING" get "$REF_COPY" --meta | jq -r .guid >"$TMP/copied.guid"
 cmp "$TMP/original.guid" "$TMP/copied.guid"
 "$WING" get "$REF_ROOT:1" >/dev/null
-printf '%s\n' '{"code":"ok"}' | "$WING" _validate "$TMP/bundled.schema.json" |
+printf '%s\n' '{"code":"ok"}' | "$WING_TESTKIT" validate "$TMP/bundled.schema.json" |
     grep -qx valid
 set +e
-printf '%s\n' '{"code":7}' | "$WING" _validate "$TMP/bundled.schema.json" >"$TMP/invalid.out"
+printf '%s\n' '{"code":7}' | "$WING_TESTKIT" validate "$TMP/bundled.schema.json" >"$TMP/invalid.out"
 invalid_status=$?
 set -e
 [ "$invalid_status" -eq 2 ]
@@ -138,7 +140,7 @@ printf '%s\n' '{"topic":"'"$REF_INVOICE"'","value":"{\"price\":12}","headers":[]
 "$KITE" consume --from-beginning --max 1 --idle 2s --json "$REF_INVOICE" |
     "$WING" read | jq -e '.value.price == 12' >/dev/null
 "$WING" get "$REF_INVOICE" >"$TMP/relative-bundled.schema.json"
-printf '%s\n' '{"price":12}' | "$WING" _validate "$TMP/relative-bundled.schema.json" | grep -qx valid
+printf '%s\n' '{"price":12}' | "$WING_TESTKIT" validate "$TMP/relative-bundled.schema.json" | grep -qx valid
 
 echo "empty values and early close"
 printf '%s\n' '{"topic":"'"$ORDERS"'","value":"","headers":[]}' |

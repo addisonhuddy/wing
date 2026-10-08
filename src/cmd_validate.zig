@@ -54,29 +54,29 @@ pub fn validateCommand(init: std.process.Init, args: []const []const u8) !noretu
         const instance = jv.parse(record_alloc, line) catch {
             invalid = true;
             record_io.writeLine(&writer.interface, "invalid") catch
-                app.fatal("failed writing stdout", false, "_validate");
+                app.fatal("failed writing stdout", false, "wing-testkit");
             record_io.writeLine(&writer.interface, "invalid JSON instance") catch
-                app.fatal("failed writing stdout", false, "_validate");
+                app.fatal("failed writing stdout", false, "wing-testkit");
             continue;
         };
         const errors = try validator.validate(record_alloc, &plan, instance.root, .{});
         if (errors.len == 0) {
             writer.interface.writeAll("valid\n") catch
-                app.fatal("failed writing stdout", false, "_validate");
+                app.fatal("failed writing stdout", false, "wing-testkit");
         } else {
             invalid = true;
             record_io.writeLine(&writer.interface, "invalid") catch
-                app.fatal("failed writing stdout", false, "_validate");
+                app.fatal("failed writing stdout", false, "wing-testkit");
             for (errors) |failure| {
                 writer.interface.print("{s}: {s}: {s}\n", .{
                     failure.instanceLocation,
                     failure.keywordLocation,
                     failure.@"error",
-                }) catch app.fatal("failed writing stdout", false, "_validate");
+                }) catch app.fatal("failed writing stdout", false, "wing-testkit");
             }
         }
     }
-    writer.interface.flush() catch app.fatal("failed writing stdout", false, "_validate");
+    writer.interface.flush() catch app.fatal("failed writing stdout", false, "wing-testkit");
     std.process.exit(if (invalid) 2 else 0);
 }
 
@@ -421,7 +421,7 @@ fn findRegexError(alloc: std.mem.Allocator, node: *const jv.Node) ?[]const u8 {
 }
 
 fn usage() noreturn {
-    app.stderr("usage: wing _validate SCHEMA_FILE [--draft D] [--remotes DIR]", .{});
-    app.stderr("usage: wing _jsts TESTS_DRAFT_DIR --draft D", .{});
+    app.stderr("usage: wing-testkit validate SCHEMA_FILE [--draft D] [--remotes DIR]", .{});
+    app.stderr("usage: wing-testkit jsts TESTS_DRAFT_DIR --draft D", .{});
     std.process.exit(1);
 }

@@ -15,6 +15,18 @@ pub const Invocation = struct {
     command: []const u8,
     args: []const []const u8,
 };
+/// Every user-facing command. Dispatch, suggestions, error attribution and
+/// completion checks all read this one table.
+pub const Command = enum { read, write, ls, get, push, rm, registry, update };
+pub const command_names = std.meta.fieldNames(Command);
+/// Global options that take a separate value argument.
+pub const global_value_options = [_][]const u8{ "--registry", "--config", "--schema-dir", "--errors" };
+
+pub fn isGlobalValueOption(arg: []const u8) bool {
+    for (global_value_options) |option| if (std.mem.eql(u8, arg, option)) return true;
+    return false;
+}
+
 pub const ParseResult = union(enum) { help, version, ok: Invocation, err: []const u8 };
 
 const options = [_][]const u8{
@@ -86,11 +98,10 @@ fn globalOptionError(alloc: std.mem.Allocator, arg: []const u8) []const u8 {
 }
 
 pub fn commandSuggestion(name: []const u8) ?[]const u8 {
-    const commands = [_][]const u8{ "read", "write", "ls", "get", "push", "rm", "registry", "update" };
     var best: ?[]const u8 = null;
     var best_dist: usize = 3;
     var tie = false;
-    for (commands) |candidate| {
+    for (command_names) |candidate| {
         const d = distance(name, candidate);
         if (d == 0) continue;
         if (d < best_dist) {
@@ -142,7 +153,7 @@ pub fn parse(alloc: std.mem.Allocator, args: []const []const u8) ParseResult {
             global.verbose = true;
             continue;
         }
-        if (std.mem.eql(u8, arg, "--registry") or std.mem.eql(u8, arg, "--config") or std.mem.eql(u8, arg, "--schema-dir") or std.mem.eql(u8, arg, "--errors")) {
+        if (isGlobalValueOption(arg)) {
             i += 1;
             if (i >= args.len) return .{ .err = std.fmt.allocPrint(alloc, "{s} requires a value", .{arg}) catch "out of memory" };
             const value = args[i];

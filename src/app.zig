@@ -308,18 +308,17 @@ pub fn errorsRequested(args: []const []const u8) bool {
 }
 
 pub fn commandFromArgs(args: []const []const u8) []const u8 {
-    const commands = [_][]const u8{ "read", "write", "ls", "get", "push", "rm", "registry", "update" };
     var skip_value = false;
     for (args) |arg| {
         if (skip_value) {
             skip_value = false;
             continue;
         }
-        if (std.mem.eql(u8, arg, "--registry") or std.mem.eql(u8, arg, "--config") or std.mem.eql(u8, arg, "--schema-dir") or std.mem.eql(u8, arg, "--errors")) {
+        if (cli.isGlobalValueOption(arg)) {
             skip_value = true;
             continue;
         }
-        for (commands) |command| if (std.mem.eql(u8, arg, command)) return command;
+        for (cli.command_names) |command| if (std.mem.eql(u8, arg, command)) return command;
     }
     return "";
 }

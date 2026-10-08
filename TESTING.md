@@ -15,7 +15,9 @@ scripts/smoke-live.sh
 `cli-check.sh` isolates HOME, XDG configuration, and its working directory.
 `jsts.sh` fetches the pinned JSON-Schema-Test-Suite revision and requires every
 required test in draft-04, draft-06, draft-07, 2019-09, and 2020-12 to pass.
-Optional cases are informational. `completion-check.sh` exercises the shell
+Optional cases are informational. The suite, differential, and benchmark scripts drive
+`wing-testkit` (`zig build testkit`), a separate harness binary; the release
+`wing` binary carries no hidden test commands. `completion-check.sh` exercises the shell
 completion scripts in installed bash, zsh, and fish shells.
 
 For live checks, provide a reachable Schema Registry with

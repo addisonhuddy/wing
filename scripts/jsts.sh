@@ -23,9 +23,9 @@ if [[ "$(git -C "$suite_dir" rev-parse HEAD)" != "$commit" ]]; then
 fi
 
 cd "$repo_root"
-zig build -Doptimize=ReleaseSmall
-binary="$repo_root/zig-out/bin/wing"
+zig build testkit -Doptimize=ReleaseSmall
+binary="$repo_root/zig-out/bin/wing-testkit"
 for draft in draft4 draft6 draft7 draft2019-09 draft2020-12; do
-  "$binary" _jsts "$suite_dir/tests/$draft" --draft "$draft"
+  "$binary" jsts "$suite_dir/tests/$draft" --draft "$draft"
 done
-"$binary" _fitprops "$suite_dir/tests/draft7"
+"$binary" fitprops "$suite_dir/tests/draft7"
