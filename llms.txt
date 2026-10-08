@@ -18,8 +18,10 @@ with kite, a Kafka CLI, using one JSON record per line.
 - `wing ls [TOPIC]`, `wing rm REF -y`, `wing registry list|set|init`, and
   `wing update [VERSION]` manage registry schemas and configuration.
 - Record input is kite `--json`: `read` accepts `value` or `value_b64`;
-  `write` requires `value`. Strings represent bytes; object/array values use
-  their source JSON.
+  `write` requires `value`, except that with a REF a JSON object/array line
+  without `value`/`value_b64` is the record value (wrapped in an envelope).
+  A line with a top-level `value` member is always an envelope. Strings
+  represent bytes; object/array values use their source JSON.
 - `wing read` decodes top-level `key_b64` / `value_b64` and array-header
   `value_b64`; decoded top-level fields do not pass through unchanged.
 - stdout is data and stderr is diagnostics. Validation pointers are plain JSON
