@@ -21,6 +21,18 @@ pub fn build(b: *std.Build) void {
     });
     const exe = b.addExecutable(.{ .name = "wing", .root_module = mod });
     b.installArtifact(exe);
+    const testkit = b.addExecutable(.{
+        .name = "wing-testkit",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/testkit.zig"),
+            .target = target,
+            .optimize = optimize,
+            .strip = strip,
+            .single_threaded = true,
+        }),
+    });
+    const testkit_step = b.step("testkit", "Build wing-testkit (JSON Schema Test Suite and differential harness)");
+    testkit_step.dependOn(&b.addInstallArtifact(testkit, .{}).step);
     const test_step = b.step("test", "Run unit tests");
     const tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -30,4 +42,12 @@ pub fn build(b: *std.Build) void {
         }),
     });
     test_step.dependOn(&b.addRunArtifact(tests).step);
+    const testkit_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/testkit.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    test_step.dependOn(&b.addRunArtifact(testkit_tests).step);
 }

@@ -9,22 +9,12 @@ const cmd_update = @import("cmd_update.zig");
 const cmd_read = @import("cmd_read.zig");
 const cmd_write = @import("cmd_write.zig");
 const cmd_push = @import("cmd_push.zig");
-const cmd_validate = @import("cmd_validate.zig");
 
 pub const panic = std.debug.simple_panic;
 
 pub fn main(init: std.process.Init) !void {
     const alloc = init.arena.allocator();
     const argv = try init.minimal.args.toSlice(alloc);
-    if (argv.len > 1 and std.mem.eql(u8, argv[1], "_validate")) {
-        try cmd_validate.validateCommand(init, argv[2..]);
-    }
-    if (argv.len > 1 and std.mem.eql(u8, argv[1], "_jsts")) {
-        try cmd_validate.jstsCommand(init, argv[2..]);
-    }
-    if (argv.len > 1 and std.mem.eql(u8, argv[1], "_fitprops")) {
-        try cmd_validate.fitPropertiesCommand(init, argv[2..]);
-    }
     if (argv.len == 2 and (std.mem.eql(u8, argv[1], "-V") or std.mem.eql(u8, argv[1], "--version"))) {
         app.writeStdout(init.io, "wing " ++ cli.version ++ "\n", false, "");
         return;
@@ -46,19 +36,23 @@ pub fn main(init: std.process.Init) !void {
         app.writeStdout(init.io, cli.help(invocation.command), false, invocation.command);
         return;
     }
-    if (std.mem.eql(u8, invocation.command, "ls")) try cmd_ls.run(init, invocation.global, invocation.args) else if (std.mem.eql(u8, invocation.command, "get")) try cmd_get.run(init, invocation.global, invocation.args) else if (std.mem.eql(u8, invocation.command, "rm")) try cmd_rm.run(init, invocation.global, invocation.args) else if (std.mem.eql(u8, invocation.command, "registry")) try cmd_registry.run(init, invocation.global, invocation.args) else if (std.mem.eql(u8, invocation.command, "read")) {
-        try cmd_read.run(init, invocation.global, invocation.args);
-    } else if (std.mem.eql(u8, invocation.command, "write")) {
-        try cmd_write.run(init, invocation.global, invocation.args);
-    } else if (std.mem.eql(u8, invocation.command, "push")) {
-        try cmd_push.run(init, invocation.global, invocation.args);
-    } else if (std.mem.eql(u8, invocation.command, "update")) {
-        cmd_update.run(init, invocation.global, invocation.args, alloc);
-    } else {
+    const command = std.meta.stringToEnum(cli.Command, invocation.command) orelse {
         const message = if (cli.commandSuggestion(invocation.command)) |candidate|
             try std.fmt.allocPrint(alloc, "unknown command '{s}'; did you mean '{s}'?", .{ invocation.command, candidate })
         else
             try std.fmt.allocPrint(alloc, "unknown command '{s}'", .{invocation.command});
         app.fatal(message, invocation.global.errors_json, invocation.command);
+    };
+    const global = invocation.global;
+    const args = invocation.args;
+    switch (command) {
+        .read => try cmd_read.run(init, global, args),
+        .write => try cmd_write.run(init, global, args),
+        .ls => try cmd_ls.run(init, global, args),
+        .get => try cmd_get.run(init, global, args),
+        .push => try cmd_push.run(init, global, args),
+        .rm => try cmd_rm.run(init, global, args),
+        .registry => try cmd_registry.run(init, global, args),
+        .update => cmd_update.run(init, global, args, alloc),
     }
 }

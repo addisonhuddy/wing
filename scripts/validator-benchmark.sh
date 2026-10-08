@@ -2,7 +2,7 @@
 set -euo pipefail
 
 readonly repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-readonly binary="${WING_BIN:-${repo_root}/zig-out/bin/wing}"
+readonly binary="${WING_TESTKIT:-${repo_root}/zig-out/bin/wing-testkit}"
 readonly input="${1:-/tmp/bench.jsonl}"
 readonly prepared_input="$(mktemp "${TMPDIR:-/tmp}/wing-validator-benchmark.XXXXXX")"
 trap 'rm -f "$prepared_input"' EXIT
@@ -34,7 +34,7 @@ run_benchmark() {
   local elapsed_ns
 
   start_ns="$(date +%s%N)"
-  "$binary" _validate "$schema" --draft draft7 < "$prepared_input" > /dev/null
+  "$binary" validate "$schema" --draft draft7 < "$prepared_input" > /dev/null
   end_ns="$(date +%s%N)"
   elapsed_ns="$((end_ns - start_ns))"
   python3 - "$name" "$records" "$elapsed_ns" <<'PY'

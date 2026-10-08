@@ -2,7 +2,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-WING=${WING:-"$PWD/zig-out/bin/wing"}
+WING_TESTKIT=${WING_TESTKIT:-"$PWD/zig-out/bin/wing-testkit"}
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
@@ -19,7 +19,7 @@ if [ -z "$ORACLE" ] || [ ! -x "$ORACLE" ]; then
     echo "SKIP: Sourcemeta jsonschema CLI is unavailable (tried PATH and npm @sourcemeta/jsonschema)"
     exit 0
 fi
-[ -x "$WING" ] || zig build
+[ -x "$WING_TESTKIT" ] || zig build testkit
 
 cat >"$TMP/schema.json" <<'EOF'
 {"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object"}
@@ -59,7 +59,7 @@ for schema in src/schema/meta/*.json; do
     for instance in "${instances[@]}"; do
         printf '%s\n' "$instance" >"$TMP/instance.json"
         set +e
-        "$WING" _validate "$schema" <"$TMP/instance.json" >/dev/null 2>&1
+        "$WING_TESTKIT" validate "$schema" <"$TMP/instance.json" >/dev/null 2>&1
         wing_status=$?
         oracle_valid "$schema" "$TMP/instance.json"
         oracle_status=$?
