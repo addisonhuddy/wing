@@ -600,6 +600,7 @@ defaults:
   schema.registry.url: http://127.0.0.1:9
   basic.auth.user.info: user:do-not-log
   http.header.X-Test: header-value
+  http.header.X-Api-Key: s3cret-value
 EOF
 set +e
 (cd "$TMP/debug" && env -u WING_CONFIG -u WING_TARGET -u SCHEMA_REGISTRY_URL \
@@ -609,13 +610,18 @@ status=$?
 set -e
 [ "$status" -eq 1 ] &&
     grep -Fq "WING_DEBUG > Authorization: [redacted]" "$TMP/debug.err" &&
-    grep -Fq "WING_DEBUG > X-Test: header-value" "$TMP/debug.err" &&
-    ! grep -Fq "do-not-log" "$TMP/debug.err" || {
+    grep -Fq "WING_DEBUG > X-Test: [redacted]" "$TMP/debug.err" &&
+    grep -Fq "WING_DEBUG > X-Api-Key: [redacted]" "$TMP/debug.err" &&
+    grep -Fq "WING_DEBUG > Accept: application/vnd.schemaregistry.v1+json" "$TMP/debug.err" &&
+    grep -Fq "WING_DEBUG > Confluent-Accept-Unknown-Properties: true" "$TMP/debug.err" &&
+    ! grep -Fq "do-not-log" "$TMP/debug.err" &&
+    ! grep -Fq "header-value" "$TMP/debug.err" &&
+    ! grep -Fq "s3cret-value" "$TMP/debug.err" || {
     echo "FAIL debug header logging or Authorization redaction"
     cat "$TMP/debug.err"
     exit 1
 }
-echo "PASS debug header logging and Authorization redaction"
+echo "PASS debug header logging and sensitive header redaction"
 
 cat >"$TMP/tls/wing.yaml" <<'EOF'
 defaults:
