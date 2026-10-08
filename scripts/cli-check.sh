@@ -109,6 +109,19 @@ run_case missing-topic 1 empty "missing REF" get
 run_case missing-name 1 empty "missing NAME" registry set
 run_case update-bad-tag 1 empty "'main' is not a release tag (want e.g. v0.1.0)" update main
 run_case update-extra 1 empty "unexpected argument 'v2'" update v1 v2
+printf '#!/bin/sh\nprintf "%%s\\n" "$@" >"$WING_UPDATE_CAPTURE"\n' >"$TMP/fake-install.sh"
+chmod +x "$TMP/fake-install.sh"
+WING_INSTALLER_URL="file://$TMP/fake-install.sh" WING_UPDATE_CAPTURE="$TMP/update-args" \
+    HOME="$TMP/home" XDG_CONFIG_HOME="$TMP/xdg" "$BIN" update v9.9.9
+grep -Fxq -- '--bin-dir' "$TMP/update-args" &&
+    grep -Fxq -- "$(dirname "$BIN")" "$TMP/update-args" &&
+    grep -Fxq -- '--version' "$TMP/update-args" &&
+    grep -Fxq -- 'v9.9.9' "$TMP/update-args" || {
+    echo "FAIL update: installer was not rerun for the running binary's directory"
+    cat "$TMP/update-args"
+    exit 1
+}
+echo "PASS update-installer-target"
 run_case read-empty-input 0 empty "wing read: 0 read, 0 passed, 0 failed" read
 run_read_input_case read-missing-id 2 nonempty "no __value_schema_id header or schema-id prefix" \
     '{"topic":"orders","value":"{}","headers":[]}' read
@@ -118,9 +131,9 @@ run_read_input_case read-malformed-record 1 empty "expected a JSON record" '{"va
 run_read_input_case read-empty-value 0 nonempty "1 empty" \
     '{"topic":"orders","value":"","headers":[]}' read
 run_read_input_case push-offline-check 0 empty empty '{"type":"object"}' push --check
-run_read_input_case push-typo-keyword 2 empty "did you mean 'type'?" \
+run_read_input_case push-typo-keyword 2 empty "wing push: unknown keyword 'typ' at the root (did you mean 'type'?)" \
     '{"typ":"object"}' push --check
-run_read_input_case push-compat-check-rejected 1 empty "wing: --compat cannot be combined with --check" \
+run_read_input_case push-compat-check-rejected 1 empty "wing push: --compat cannot be combined with --check" \
     '{"type":"object"}' push --check --compat BACKWARD
 run_read_input_case write-empty-value 0 nonempty "1 written" \
     '{"value":"","headers":[{"key":"__value_schema_id","value":"stale"}]}' write
@@ -203,6 +216,9 @@ EOF
 cat >"$TMP/schema-cache/44444444-4444-4444-4444-444444444444.json" <<'EOF'
 {"topic":"offline","version":1,"id":10,"guid":"44444444-4444-4444-4444-444444444444","compat":"BACKWARD","schema":"{\"type\":\"integer\"}","references":null,"metadata":null,"ruleSet":null,"subject":"offline-key"}
 EOF
+cat >"$TMP/schema-cache/55555555-5555-5555-5555-555555555555.json" <<'EOF'
+{"topic":"currency","version":1,"id":11,"guid":"55555555-5555-5555-5555-555555555555","compat":"BACKWARD","schema":"{\"type\":\"object\",\"properties\":{\"currency\":{\"type\":\"string\",\"default\":\"USD\"}},\"additionalProperties\":false}","references":null,"metadata":null,"ruleSet":null,"subject":"currency-value"}
+EOF
 chmod 600 "$TMP/schema-cache/"*.json
 mkdir -p "$TMP/cache-work"
 run_read_input_case read-offline-cache-guid 0 nonempty "1 read, 1 passed, 0 failed" \
@@ -242,6 +258,15 @@ grep -Fq '"partition":0,"offset":17' "$TMP/write-invalid-json.err" || {
     cat "$TMP/write-invalid-json.err"
     exit 1
 }
+grep -Fq '"instanceLocation":""' "$TMP/write-invalid-json.err" &&
+    grep -Fq '"keywordLocation":"/required"' "$TMP/write-invalid-json.err" || {
+    echo "FAIL write-invalid-json: locations are not plain JSON Pointers"
+    cat "$TMP/write-invalid-json.err"
+    exit 1
+}
+run_read_input_case write-summary-json 0 nonempty '"kind":"summary","read":1,"passed":1,"failed":0,"empty":0,"fit":{"coerce":0,"defaults":0,"drop-extra":0,"wrap":0},"written":1,"fitted":0' \
+    '{"value":"{\"x\":1}","schema":{"value":{"guid":"22222222-2222-2222-2222-222222222222"}}}' \
+    --workdir "$TMP/cache-work" --errors=json --schema-dir "$TMP/schema-cache" write
 valid_write_record='{"value":"{\"x\":1}","schema":{"value":{"guid":"22222222-2222-2222-2222-222222222222"}}}'
 invalid_write_record='{"value":"{}","schema":{"value":{"guid":"22222222-2222-2222-2222-222222222222"}}}'
 set +e
@@ -268,6 +293,15 @@ run_read_input_case write-fit 0 nonempty "1 fitted" \
 grep -Fq '"value":{"x":7}' "$TMP/write-fit.out" || {
     echo "FAIL write-fit: fitted value is missing"
     cat "$TMP/write-fit.out"
+    exit 1
+}
+run_read_input_case write-fit-verbose 0 nonempty "1 fitted" \
+    '{"value":"{\"extra\":1}","schema":{"value":{"guid":"55555555-5555-5555-5555-555555555555"}}}' \
+    --workdir "$TMP/cache-work" --schema-dir "$TMP/schema-cache" -v write --fit
+grep -Fq 'wing write: line 1: /extra removed (drop-extra)' "$TMP/write-fit-verbose.err" &&
+    grep -Fq 'wing write: line 1: /currency set to "USD" (default)' "$TMP/write-fit-verbose.err" || {
+    echo "FAIL write-fit-verbose: fit operations were not described correctly"
+    cat "$TMP/write-fit-verbose.err"
     exit 1
 }
 run_read_input_case write-fit-check-unchanged 2 identical "1 fitted" \

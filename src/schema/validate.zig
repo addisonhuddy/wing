@@ -794,11 +794,23 @@ fn keywordPath(ctx: *Context, schema: *const compile_mod.Node, name: []const u8)
 }
 
 fn fail(ctx: *Context, schema: *const compile_mod.Node, message: []const u8, instance_path: *const InstancePath, keyword: []const u8) !void {
+    const instance_location = try plainPointer(ctx.alloc, try instance_path.render(ctx.alloc));
+    const keyword_location = try plainPointer(ctx.alloc, try keywordPath(ctx, schema, keyword));
     try ctx.errors.append(ctx.alloc, .{
-        .instanceLocation = try instance_path.render(ctx.alloc),
-        .keywordLocation = try keywordPath(ctx, schema, keyword),
+        .instanceLocation = instance_location,
+        .keywordLocation = keyword_location,
         .@"error" = message,
     });
+}
+
+fn plainPointer(alloc: std.mem.Allocator, location: []const u8) ![]const u8 {
+    if (!std.mem.startsWith(u8, location, "#")) return location;
+    if (std.mem.indexOfScalarPos(u8, location, 1, '#') == null) return location[1..];
+    var result: std.ArrayListUnmanaged(u8) = .empty;
+    for (location) |byte| {
+        if (byte != '#') try result.append(alloc, byte);
+    }
+    return result.items;
 }
 
 test "validator checks types, exact numbers, objects, and arrays" {

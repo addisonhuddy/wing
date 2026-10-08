@@ -263,10 +263,13 @@ pub fn run(init: std.process.Init, global: cli.Global, args: []const []const u8)
     var record_arena = std.heap.ArenaAllocator.init(alloc);
     defer record_arena.deinit();
     var line_number: usize = 0;
+    var read_count: usize = 0;
+    var passed: usize = 0;
     var written: usize = 0;
     var fitted: usize = 0;
     var check_changes: usize = 0;
     var failed: usize = 0;
+    var empty: usize = 0;
     var reported: std.StringHashMapUnmanaged(void) = .empty;
     var dropped: std.StringHashMapUnmanaged(usize) = .empty;
     var rule_counts: [4]usize = .{ 0, 0, 0, 0 };
@@ -280,12 +283,14 @@ pub fn run(init: std.process.Init, global: cli.Global, args: []const []const u8)
         const line = maybe_line orelse break;
         line_number += 1;
         if (std.mem.trim(u8, line, " \t\r").len == 0) continue;
+        read_count += 1;
         _ = record_arena.reset(.retain_capacity);
         const line_alloc = record_arena.allocator();
         const input_record = record.Record.parse(line_alloc, line) catch
             fatalLine(global, line_number, "expected a JSON record; did you mean 'kite consume --json'?");
 
         const value_bytes = try record.bytes(line_alloc, input_record.document, input_record.value);
+        if (value_bytes.len == 0) empty += 1;
         var value_part: Part = .{ .payload = value_bytes, .source_string = input_record.value.value == .string };
         var value_info: ?*Info = null;
         if (value_bytes.len > 0) {
@@ -350,10 +355,11 @@ pub fn run(init: std.process.Init, global: cli.Global, args: []const []const u8)
             if (!check) {
                 output.interface.flush() catch {};
                 printDropNotes(dropped, global);
-                printSummary(global, written, fitted, failed, rule_counts);
+                printSummary(global, read_count, passed, failed, empty, written, fitted, fit_enabled, rule_counts);
                 std.process.exit(2);
             }
         }
+        if (!record_failed) passed += 1;
         if (check) {
             if (would_change) {
                 fitted += 1;
@@ -381,7 +387,7 @@ pub fn run(init: std.process.Init, global: cli.Global, args: []const []const u8)
     }
     output.interface.flush() catch |err| outputFailure(err, global.errors_json);
     printDropNotes(dropped, global);
-    printSummary(global, written, fitted, failed, rule_counts);
+    printSummary(global, read_count, passed, failed, empty, written, fitted, fit_enabled, rule_counts);
     std.process.exit(if (interrupted.load(.acquire)) 130 else if (failed > 0 or (check and check_changes > 0)) 2 else 0);
 }
 
@@ -632,18 +638,19 @@ fn logChanges(
             try dropped.put(alloc, change.path, count + 1);
         }
         if (global.verbose) {
-            std.debug.print("wing write: line {d}: {s} {s} -> {s} ({s})\n", .{
-                line,
-                change.path,
-                change.before orelse "null",
-                change.after orelse "null",
-                switch (change.rule) {
-                    .coerce => "coerce",
-                    .defaults => "default",
-                    .drop_extra => "drop-extra",
-                    .wrap => "wrap",
-                },
-            });
+            switch (change.rule) {
+                .drop_extra => std.debug.print("wing write: line {d}: {s} removed (drop-extra)\n", .{ line, change.path }),
+                .defaults => std.debug.print("wing write: line {d}: {s} set to {s} (default)\n", .{
+                    line, change.path, change.after orelse "null",
+                }),
+                .coerce, .wrap => std.debug.print("wing write: line {d}: {s} {s} -> {s} ({s})\n", .{
+                    line,
+                    change.path,
+                    change.before orelse "null",
+                    change.after orelse "null",
+                    if (change.rule == .coerce) "coerce" else "wrap",
+                }),
+            }
         }
     }
 }
@@ -677,18 +684,36 @@ fn emitPatchChanges(changes: []const fit.Change, first: *bool) void {
     }
 }
 
-fn printSummary(global: cli.Global, written: usize, fitted: usize, failed: usize, rules: [4]usize) void {
+fn printSummary(
+    global: cli.Global,
+    read_count: usize,
+    passed: usize,
+    failed: usize,
+    empty: usize,
+    written: usize,
+    fitted: usize,
+    fit_enabled: bool,
+    rules: [4]usize,
+) void {
     if (global.quiet) return;
     if (global.errors_json) {
         std.debug.print(
-            "{{\"command\":\"write\",\"kind\":\"summary\",\"written\":{d},\"fitted\":{d},\"failed\":{d},\"fit\":{{\"coerce\":{d},\"defaults\":{d},\"drop-extra\":{d},\"wrap\":{d}}}}}\n",
-            .{ written, fitted, failed, rules[0], rules[1], rules[2], rules[3] },
+            "{{\"command\":\"write\",\"kind\":\"summary\",\"read\":{d},\"passed\":{d},\"failed\":{d},\"empty\":{d},\"fit\":{{\"coerce\":{d},\"defaults\":{d},\"drop-extra\":{d},\"wrap\":{d}}},\"written\":{d},\"fitted\":{d}}}\n",
+            .{ read_count, passed, failed, empty, rules[0], rules[1], rules[2], rules[3], written, fitted },
         );
     } else {
-        std.debug.print(
-            "wing write: {d} written, {d} fitted (coerce {d}, defaults {d}, drop-extra {d}, wrap {d})\n",
-            .{ written, fitted, rules[0], rules[1], rules[2], rules[3] },
-        );
+        std.debug.print("wing write: {d} written, {d} fitted", .{ written, fitted });
+        if (fit_enabled) {
+            const names = [_][]const u8{ "coerce", "defaults", "drop-extra", "wrap" };
+            var first = true;
+            for (rules, names) |count, name| {
+                if (count == 0) continue;
+                std.debug.print("{s}{s} {d}", .{ if (first) " (" else ", ", name, count });
+                first = false;
+            }
+            if (!first) std.debug.print(")", .{});
+        }
+        std.debug.print("\n", .{});
     }
 }
 

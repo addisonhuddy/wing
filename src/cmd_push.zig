@@ -16,6 +16,10 @@ const Options = struct {
     compatibility: ?[]const u8 = null,
 };
 
+fn pushStderr(comptime fmt: []const u8, args: anytype) void {
+    std.debug.print("wing push: " ++ fmt ++ "\n", args);
+}
+
 pub fn run(init: std.process.Init, global: cli.Global, args: []const []const u8) !void {
     const alloc = init.arena.allocator();
     var options: Options = .{};
@@ -60,7 +64,7 @@ pub fn run(init: std.process.Init, global: cli.Global, args: []const []const u8)
     } else source;
     const document = jv.parse(alloc, schema_text) catch app.fatal("schema is not valid JSON", global.errors_json, "push");
     const plan = schema_compile.compile(alloc, document, .{}) catch |err| {
-        app.stderr("schema cannot be compiled: {s}", .{@errorName(err)});
+        pushStderr("schema cannot be compiled: {s}", .{@errorName(err)});
         std.process.exit(2);
     };
 
@@ -73,7 +77,7 @@ pub fn run(init: std.process.Init, global: cli.Global, args: []const []const u8)
         if (app.jsonField(meta_value, "references")) |references| {
             if (references == .array and references.array.items.len > 0) {
                 if (settings.urls.len == 0) {
-                    app.stderr("missing referenced schemas; configure a registry before pushing --meta", .{});
+                    pushStderr("missing referenced schemas; configure a registry before pushing --meta", .{});
                     std.process.exit(1);
                 }
                 for (references.array.items) |reference| {
@@ -81,14 +85,14 @@ pub fn run(init: std.process.Init, global: cli.Global, args: []const []const u8)
                     const version_value = app.jsonField(reference, "version") orelse continue;
                     const version = try registry_mod.valueText(alloc, version_value);
                     _ = reg.schema(subject, version) catch {
-                        app.stderr("missing reference {s} version {s}", .{ subject, version });
+                        pushStderr("missing reference {s} version {s}", .{ subject, version });
                         std.process.exit(1);
                     };
                 }
                 reference_resources = reg.referenceResources(meta_value, settings.schema_dir) catch |err|
                     app.fatal(allocFmt(alloc, "cannot resolve --meta references: {s}", .{@errorName(err)}), global.errors_json, "push");
                 const referenced_plan = schema_compile.compile(alloc, document, .{ .extra_resources = reference_resources }) catch |err| {
-                    app.stderr("schema cannot be compiled with --meta references: {s}", .{@errorName(err)});
+                    pushStderr("schema cannot be compiled with --meta references: {s}", .{@errorName(err)});
                     std.process.exit(2);
                 };
                 lint_failed = (try lintSchema(alloc, &referenced_plan, document, allowed_refs)) or lint_failed;
@@ -137,7 +141,7 @@ pub fn run(init: std.process.Init, global: cli.Global, args: []const []const u8)
                 }
                 if (latest_version) |version| {
                     try writeGuid(init.io, guid);
-                    app.stderr("{s} version {s} already has this schema", .{ subject, version });
+                    pushStderr("{s} version {s} already has this schema", .{ subject, version });
                     return;
                 }
             }
@@ -158,7 +162,7 @@ pub fn run(init: std.process.Init, global: cli.Global, args: []const []const u8)
     try writeGuid(init.io, guid);
     const versions = reg.versions(subject) catch .null;
     const version = if (versions == .array) app.latestVersion(alloc, versions) else "latest";
-    app.stderr("registered {s} version {s}", .{ subject, version });
+    pushStderr("registered {s} version {s}", .{ subject, version });
 }
 
 const CompatState = struct { had_override: bool = false, level: ?[]const u8 = null };
@@ -183,9 +187,9 @@ fn restoreCompatibility(reg: *registry_mod.Registry, subject: []const u8, state:
     if (state.had_override) {
         const level = state.level orelse return;
         const body = std.fmt.allocPrint(reg.alloc, "{{\"compatibility\":\"{s}\"}}", .{level}) catch return;
-        _ = reg.put(path, body) catch app.stderr("could not restore compatibility for {s}", .{subject});
+        _ = reg.put(path, body) catch pushStderr("could not restore compatibility for {s}", .{subject});
     } else {
-        _ = reg.delete(path) catch app.stderr("could not remove temporary compatibility for {s}", .{subject});
+        _ = reg.delete(path) catch pushStderr("could not remove temporary compatibility for {s}", .{subject});
     }
 }
 
@@ -200,11 +204,11 @@ fn compatibilityCheck(alloc: std.mem.Allocator, reg: *registry_mod.Registry, sub
     if (compatible == null or compatible.? != .bool or compatible.?.bool) return true;
     if (registry_mod.objectValue(response, "messages")) |messages| {
         if (messages == .array) for (messages.array.items) |message| {
-            app.stderr("{s}", .{registry_mod.stringValue(message) orelse "incompatible schema"});
+            pushStderr("{s}", .{registry_mod.stringValue(message) orelse "incompatible schema"});
         };
     }
     if (registry_mod.objectValue(response, "message")) |message|
-        app.stderr("{s}", .{registry_mod.stringValue(message) orelse "incompatible schema"});
+        pushStderr("{s}", .{registry_mod.stringValue(message) orelse "incompatible schema"});
     return false;
 }
 
@@ -281,7 +285,9 @@ fn lintSchema(
         });
         const failures = try validator.validate(alloc, &meta_plan, document.root, .{});
         for (failures) |failure| {
-            app.stderr("schema metaschema error {s}: {s}", .{ failure.keywordLocation, failure.@"error" });
+            pushStderr("schema metaschema error at {s}: {s}", .{
+                lintLocation(failure.keywordLocation), failure.@"error",
+            });
             failed = true;
         }
     }
@@ -299,12 +305,12 @@ fn lintNode(
     if (schema.keyword("default")) |default_value| {
         const failures = try validator.validateSubschema(alloc, plan, schema, default_value, .{});
         for (failures) |failure| {
-            app.stderr("default at {s} is invalid: {s}", .{ schema.location, failure.@"error" });
+            pushStderr("default at {s} is invalid: {s}", .{ lintLocation(schema.location), failure.@"error" });
             failed.* = true;
         }
     }
     if (hasUnsatisfiableTypeEnum(schema.schema)) {
-        app.stderr("unsatisfiable type and enum at {s}", .{schema.location});
+        pushStderr("unsatisfiable type and enum at {s}", .{lintLocation(schema.location)});
         failed.* = true;
     }
     if (hasCombinatorAdditionalProperties(schema.schema, schema.draft)) {
@@ -312,7 +318,9 @@ fn lintNode(
             "use unevaluatedProperties or declare the properties at the top level"
         else
             "declare the properties at the top level";
-        app.stderr("additionalProperties:false with properties only inside a combinator at {s}; {s}", .{ schema.location, suggestion });
+        pushStderr("additionalProperties:false with properties only inside a combinator at {s}; {s}", .{
+            lintLocation(schema.location), suggestion,
+        });
         failed.* = true;
     }
     if (schema.schema.value == .object) {
@@ -321,16 +329,20 @@ fn lintNode(
             if (std.mem.eql(u8, name, "$ref") and member.value.value == .string) {
                 const reference = member.value.value.string;
                 if (isLocalFileRef(reference) and !allowedReference(reference, allowed_refs)) {
-                    app.stderr("local-file $ref '{s}' at {s} does not resolve inside the schema; declare references via --meta", .{ reference, schema.location });
+                    pushStderr("local-file $ref '{s}' at {s} does not resolve inside the schema; declare references via --meta", .{
+                        reference, lintLocation(schema.location),
+                    });
                     failed.* = true;
                 }
             }
             if (knownKeyword(name) or annotationKeyword(name)) continue;
             if (nearestKeyword(name)) |candidate| {
-                app.stderr("unknown keyword '{s}' at {s} (did you mean '{s}'?)", .{ name, schema.location, candidate });
+                pushStderr("unknown keyword '{s}' at {s} (did you mean '{s}'?)", .{
+                    name, lintLocation(schema.location), candidate,
+                });
                 failed.* = true;
             } else {
-                app.stderr("warning: unknown keyword '{s}' at {s}", .{ name, schema.location });
+                pushStderr("warning: unknown keyword '{s}' at {s}", .{ name, lintLocation(schema.location) });
             }
         }
     }
@@ -449,7 +461,7 @@ fn checkFixtures(init: std.process.Init, alloc: std.mem.Allocator, directory: []
         const path = try std.fs.path.join(alloc, &.{ directory, category });
         var dir = std.Io.Dir.cwd().openDir(init.io, path, .{ .iterate = true }) catch {
             if (std.mem.eql(u8, category, "valid") or std.mem.eql(u8, category, "invalid"))
-                app.stderr("fixture directory '{s}' is missing", .{path});
+                pushStderr("fixture directory '{s}' is missing", .{path});
             failed = true;
             continue;
         };
@@ -459,17 +471,22 @@ fn checkFixtures(init: std.process.Init, alloc: std.mem.Allocator, directory: []
             if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".json")) continue;
             const source = try dir.readFileAlloc(init.io, entry.name, alloc, .limited(16 * 1024 * 1024));
             const document = jv.parse(alloc, source) catch {
-                app.stderr("fixture {s}/{s} is not valid JSON", .{ category, entry.name });
+                pushStderr("fixture {s}/{s} is not valid JSON", .{ category, entry.name });
                 failed = true;
                 continue;
             };
             const errors = try validator.validate(alloc, plan, document.root, .{});
             const expected_valid = std.mem.eql(u8, category, "valid");
             if ((errors.len == 0) != expected_valid) {
-                app.stderr("fixture {s}/{s} did not {s}", .{ category, entry.name, if (expected_valid) "pass" else "fail" });
+                pushStderr("fixture {s}/{s} did not {s}", .{ category, entry.name, if (expected_valid) "pass" else "fail" });
                 failed = true;
             }
         }
     }
     return failed;
+}
+
+fn lintLocation(location: []const u8) []const u8 {
+    const pointer = if (std.mem.startsWith(u8, location, "#")) location[1..] else location;
+    return if (pointer.len == 0) "the root" else pointer;
 }

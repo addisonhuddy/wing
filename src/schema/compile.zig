@@ -634,6 +634,9 @@ fn containsEmbeddedReference(node: *const jv.Node) bool {
     switch (node.value) {
         .object => |members| {
             for (members) |member| {
+                if ((std.mem.eql(u8, member.key, "$id") or std.mem.eql(u8, member.key, "id")) and
+                    member.value.value == .string and metaschemas.declaredDraft(member.value.value.string) != null)
+                    return true;
                 if ((std.mem.eql(u8, member.key, "$ref") or std.mem.eql(u8, member.key, "$dynamicRef") or std.mem.eql(u8, member.key, "$recursiveRef")) and member.value.value == .string and
                     (std.mem.startsWith(u8, member.value.value.string, "https://json-schema.org/") or
                         std.mem.startsWith(u8, member.value.value.string, "http://json-schema.org/")))

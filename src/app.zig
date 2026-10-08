@@ -16,7 +16,11 @@ pub fn fatal(message: []const u8, json_errors: bool, command: []const u8) noretu
         std.json.Stringify.value(.{ .kind = "error", .command = command, .message = message }, .{}, &out.writer) catch {};
         std.debug.print("{s}\n", .{out.written()});
     } else {
-        stderr("{s}", .{message});
+        if (std.mem.eql(u8, command, "push")) {
+            std.debug.print("wing push: {s}\n", .{message});
+        } else {
+            stderr("{s}", .{message});
+        }
         if (std.mem.startsWith(u8, message, "unknown option") or
             std.mem.startsWith(u8, message, "unknown command") or
             std.mem.eql(u8, message, "missing command") or
