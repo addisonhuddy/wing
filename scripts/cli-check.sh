@@ -117,8 +117,15 @@ run_read_input_case read-check-unchanged 2 identical "no __value_schema_id heade
 run_read_input_case read-malformed-record 1 empty "expected a JSON record" '{"value":' read
 run_read_input_case read-empty-value 0 nonempty "1 empty" \
     '{"topic":"orders","value":"","headers":[]}' read
-run_case write-stub 1 empty "not implemented yet" write
-run_case push-stub 1 empty "not implemented yet" push
+run_read_input_case push-offline-check 0 empty empty '{"type":"object"}' push --check
+run_read_input_case push-typo-keyword 2 empty "did you mean 'type'?" \
+    '{"typ":"object"}' push --check
+run_read_input_case push-compat-check-rejected 1 empty "wing: --compat cannot be combined with --check" \
+    '{"type":"object"}' push --check --compat BACKWARD
+run_read_input_case write-empty-value 0 nonempty "1 written" \
+    '{"value":"","headers":[{"key":"__value_schema_id","value":"stale"}]}' write
+run_read_input_case write-empty-value-byte-preserved 0 identical "1 written" \
+    '{"value":"","headers":[{"key":"x-trace","value":"stable"}]}' write
 run_case missing-registry-json 1 empty '"kind":"error","command":"ls"' --errors=json ls
 run_case command-error-json 1 empty '"kind":"error","command":"ls"' --errors=json ls --bogus
 
@@ -187,6 +194,16 @@ cat >"$TMP/schema-cache/11111111-1111-1111-1111-111111111111.json" <<'EOF'
 {"topic":"offline","version":1,"id":7,"guid":"11111111-1111-1111-1111-111111111111","compat":"BACKWARD","schema":"{\"type\":\"object\"}","references":null,"metadata":null,"ruleSet":null,"subject":"offline-value"}
 EOF
 chmod 600 "$TMP/schema-cache/11111111-1111-1111-1111-111111111111.json"
+cat >"$TMP/schema-cache/22222222-2222-2222-2222-222222222222.json" <<'EOF'
+{"topic":"offline","version":2,"id":8,"guid":"22222222-2222-2222-2222-222222222222","compat":"BACKWARD","schema":"{\"type\":\"object\",\"required\":[\"x\"]}","references":null,"metadata":null,"ruleSet":null,"subject":"offline-value"}
+EOF
+cat >"$TMP/schema-cache/33333333-3333-3333-3333-333333333333.json" <<'EOF'
+{"topic":"offline","version":3,"id":9,"guid":"33333333-3333-3333-3333-333333333333","compat":"BACKWARD","schema":"{\"type\":\"object\",\"properties\":{\"x\":{\"type\":\"integer\",\"default\":7}},\"additionalProperties\":false}","references":null,"metadata":null,"ruleSet":null,"subject":"offline-value"}
+EOF
+cat >"$TMP/schema-cache/44444444-4444-4444-4444-444444444444.json" <<'EOF'
+{"topic":"offline","version":1,"id":10,"guid":"44444444-4444-4444-4444-444444444444","compat":"BACKWARD","schema":"{\"type\":\"integer\"}","references":null,"metadata":null,"ruleSet":null,"subject":"offline-key"}
+EOF
+chmod 600 "$TMP/schema-cache/"*.json
 mkdir -p "$TMP/cache-work"
 run_read_input_case read-offline-cache-guid 0 nonempty "1 read, 1 passed, 0 failed" \
     '{"topic":"offline","value":"{}","headers":[{"key":"__value_schema_id","value":"\u0001\u0011\u0011\u0011\u0011\u0011\u0011\u0011\u0011\u0011\u0011\u0011\u0011\u0011\u0011\u0011\u0011"}]}' \
@@ -196,6 +213,75 @@ grep -Fq '"topic":"offline"' "$TMP/read-offline-cache-guid.out" || {
     cat "$TMP/read-offline-cache-guid.out"
     exit 1
 }
+
+run_read_input_case write-offline-cache-guid 0 nonempty "1 written" \
+    '{"value":"{}","headers":[{"key":"custom","value":"one"},{"key":"__value_schema_id","value":"stale"}],"schema":{"value":{"guid":"11111111-1111-1111-1111-111111111111"}}}' \
+    --workdir "$TMP/cache-work" --schema-dir "$TMP/schema-cache" write
+grep -Fq '"key":"__value_schema_id"' "$TMP/write-offline-cache-guid.out" &&
+    grep -Fq '"key":"custom","value":"one"' "$TMP/write-offline-cache-guid.out" &&
+    ! grep -Fq '"schema":' "$TMP/write-offline-cache-guid.out" || {
+    echo "FAIL write-offline-cache-guid: schema header or envelope transformation is wrong"
+    cat "$TMP/write-offline-cache-guid.out"
+    exit 1
+}
+run_read_input_case get-offline-cache-guid 0 nonempty empty '{}' \
+    --workdir "$TMP/cache-work" --schema-dir "$TMP/schema-cache" get 11111111-1111-1111-1111-111111111111
+grep -Fq '"type":"object"' "$TMP/get-offline-cache-guid.out" || {
+    echo "FAIL get-offline-cache-guid: cached schema was not returned"
+    cat "$TMP/get-offline-cache-guid.out"
+    exit 1
+}
+run_read_input_case write-invalid 2 empty "missing required property 'x'" \
+    '{"value":"{}","schema":{"value":{"guid":"22222222-2222-2222-2222-222222222222"}}}' \
+    --workdir "$TMP/cache-work" --schema-dir "$TMP/schema-cache" write
+run_read_input_case write-invalid-json 2 empty '"kind":"invalid"' \
+    '{"topic":"offline","partition":0,"offset":17,"value":"{}","schema":{"value":{"guid":"22222222-2222-2222-2222-222222222222"}}}' \
+    --workdir "$TMP/cache-work" --errors=json --schema-dir "$TMP/schema-cache" write
+grep -Fq '"partition":0,"offset":17' "$TMP/write-invalid-json.err" || {
+    echo "FAIL write-invalid-json: record position is missing"
+    cat "$TMP/write-invalid-json.err"
+    exit 1
+}
+valid_write_record='{"value":"{\"x\":1}","schema":{"value":{"guid":"22222222-2222-2222-2222-222222222222"}}}'
+invalid_write_record='{"value":"{}","schema":{"value":{"guid":"22222222-2222-2222-2222-222222222222"}}}'
+set +e
+printf '%s\n%s\n%s\n' "$valid_write_record" "$invalid_write_record" "$valid_write_record" |
+    (cd "$TMP/cache-work" && env -u WING_CONFIG -u WING_TARGET -u SCHEMA_REGISTRY_URL \
+        HOME="$TMP/home" XDG_CONFIG_HOME="$TMP/xdg" "$BIN" --schema-dir "$TMP/schema-cache" write \
+        >"$TMP/write-stop.out" 2>"$TMP/write-stop.err")
+status=$?
+set -e
+[ "$status" -eq 2 ] && [ "$(wc -l <"$TMP/write-stop.out")" -eq 1 ] &&
+    grep -Fq "1 written" "$TMP/write-stop.err" || {
+    echo "FAIL write-stop-on-invalid: expected one flushed output record and exit 2"
+    cat "$TMP/write-stop.out" "$TMP/write-stop.err"
+    exit 1
+}
+echo "PASS write-stop-on-invalid"
+run_read_input_case write-check-unchanged 2 identical "missing required property 'x'" \
+    "$invalid_write_record" --workdir "$TMP/cache-work" --schema-dir "$TMP/schema-cache" write --check
+run_read_input_case write-check-passes 0 empty "0 fitted" \
+    "$valid_write_record" --workdir "$TMP/cache-work" --schema-dir "$TMP/schema-cache" write --check
+run_read_input_case write-fit 0 nonempty "1 fitted" \
+    '{"value":"{\"extra\":1}","schema":{"value":{"guid":"33333333-3333-3333-3333-333333333333"}}}' \
+    --workdir "$TMP/cache-work" --schema-dir "$TMP/schema-cache" write --fit
+grep -Fq '"value":{"x":7}' "$TMP/write-fit.out" || {
+    echo "FAIL write-fit: fitted value is missing"
+    cat "$TMP/write-fit.out"
+    exit 1
+}
+run_read_input_case write-fit-check-unchanged 2 identical "1 fitted" \
+    '{"value":"{\"extra\":1}","schema":{"value":{"guid":"33333333-3333-3333-3333-333333333333"}}}' \
+    --workdir "$TMP/cache-work" --schema-dir "$TMP/schema-cache" write --fit --check
+run_read_input_case write-fit-json-patch 2 identical '"kind":"fit"' \
+    '{"value":"{\"extra\":1}","schema":{"value":{"guid":"33333333-3333-3333-3333-333333333333"}}}' \
+    --workdir "$TMP/cache-work" --errors=json --schema-dir "$TMP/schema-cache" write --fit --check
+run_read_input_case write-fit-drop-quiet 2 identical "drop-extra removed /extra from 1 records" \
+    '{"value":"{\"extra\":1}","schema":{"value":{"guid":"33333333-3333-3333-3333-333333333333"}}}' \
+    --workdir "$TMP/cache-work" -q --schema-dir "$TMP/schema-cache" write --fit --check
+run_read_input_case write-key-offline-cache 2 identical "keys are validated because offline-key exists" \
+    '{"key":"\"bad\"","value":"{}","schema":{"value":{"guid":"11111111-1111-1111-1111-111111111111"},"key":{"guid":"44444444-4444-4444-4444-444444444444"}}}' \
+    --workdir "$TMP/cache-work" --schema-dir "$TMP/schema-cache" write --check
 
 mkdir -p "$TMP/props"
 cat >"$TMP/props/wing.properties" <<'EOF'
