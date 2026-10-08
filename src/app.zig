@@ -6,6 +6,8 @@ const term = @import("term.zig");
 const jv = @import("jv.zig");
 const header = @import("header.zig");
 const validation = @import("schema/validate.zig");
+const fit = @import("schema/fit.zig");
+const record = @import("record.zig");
 
 pub fn stderr(comptime fmt: []const u8, args: anytype) void {
     std.debug.print("wing: " ++ fmt ++ "\n", args);
@@ -13,9 +15,7 @@ pub fn stderr(comptime fmt: []const u8, args: anytype) void {
 
 pub fn fatal(message: []const u8, json_errors: bool, command: []const u8) noreturn {
     if (json_errors) {
-        var out = std.Io.Writer.Allocating.init(std.heap.page_allocator);
-        std.json.Stringify.value(.{ .kind = "error", .command = command, .message = message }, .{}, &out.writer) catch {};
-        std.debug.print("{s}\n", .{out.written()});
+        (Diagnostics{ .command = command, .json = true }).value(.{ .kind = "error", .command = command, .message = message });
     } else {
         if (std.mem.eql(u8, command, "push") or std.mem.eql(u8, command, "get") or
             std.mem.eql(u8, command, "ls") or std.mem.eql(u8, command, "rm") or
@@ -71,13 +71,167 @@ pub fn emitJsonLines(alloc: std.mem.Allocator, io: std.Io, values: anytype, json
     writeStdout(io, out.written(), json_errors, command);
 }
 
-pub fn emitValidationFailureJson(failure: validation.Failure, first: *bool) void {
-    if (!first.*) std.debug.print(",", .{});
-    first.* = false;
-    var output = std.Io.Writer.Allocating.init(std.heap.page_allocator);
-    std.json.Stringify.value(failure, .{}, &output.writer) catch return;
-    std.debug.print("{s}", .{output.written()});
-}
+/// Writes stderr diagnostics for one command. Every message is one line,
+/// written under the stderr lock straight into a fixed buffer, so emitting a
+/// diagnostic never allocates.
+pub const Diagnostics = struct {
+    command: []const u8,
+    json: bool,
+    quiet: bool = false,
+    verbose: bool = false,
+
+    var stderr_buffer: [4096]u8 = undefined;
+
+    pub fn init(command: []const u8, global: cli.Global) Diagnostics {
+        return .{ .command = command, .json = global.errors_json, .quiet = global.quiet, .verbose = global.verbose };
+    }
+
+    /// Locks stderr for one diagnostic line; finish it with `end`.
+    pub fn begin(_: Diagnostics) *std.Io.Writer {
+        return &std.debug.lockStderr(&stderr_buffer).file_writer.interface;
+    }
+
+    pub fn end(_: Diagnostics, writer: *std.Io.Writer) void {
+        writer.writeByte('\n') catch {};
+        std.debug.unlockStderr();
+    }
+
+    pub fn print(self: Diagnostics, comptime fmt: []const u8, args: anytype) void {
+        const writer = self.begin();
+        writer.print(fmt, args) catch {};
+        self.end(writer);
+    }
+
+    pub fn value(self: Diagnostics, payload: anytype) void {
+        const writer = self.begin();
+        std.json.Stringify.value(payload, .{ .emit_null_optional_fields = false }, writer) catch {};
+        self.end(writer);
+    }
+
+    pub fn note(self: Diagnostics, message: []const u8) void {
+        if (self.json)
+            self.value(.{ .command = self.command, .kind = "note", .message = message })
+        else
+            self.print("{s}", .{message});
+    }
+
+    /// Formats a note into a fixed buffer; long notes are truncated.
+    pub fn notef(self: Diagnostics, comptime fmt: []const u8, args: anytype) void {
+        var buffer: [1024]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&buffer);
+        writer.print(fmt, args) catch {};
+        self.note(writer.buffered());
+    }
+
+    /// `{"command","kind":"invalid",["line",topic,partition,offset,]"output":{"valid":false,"errors":[...]}}`
+    pub fn invalid(self: Diagnostics, line: ?usize, input: ?record.Record, groups: []const []const validation.Failure) void {
+        const writer = self.begin();
+        defer self.end(writer);
+        var stream: std.json.Stringify = .{ .writer = writer };
+        self.writeInvalid(&stream, line, input, groups) catch {};
+    }
+
+    /// `{"command","kind":"fit","line",...,"patch":[RFC 6902 operations]}`
+    pub fn fitPatch(self: Diagnostics, line: usize, input: record.Record, groups: []const []const fit.Change) void {
+        const writer = self.begin();
+        defer self.end(writer);
+        var stream: std.json.Stringify = .{ .writer = writer };
+        self.writeFitPatch(&stream, line, input, groups) catch {};
+    }
+
+    fn writeInvalid(
+        self: Diagnostics,
+        stream: *std.json.Stringify,
+        line: ?usize,
+        input: ?record.Record,
+        groups: []const []const validation.Failure,
+    ) std.json.Stringify.Error!void {
+        try self.writeHead(stream, "invalid", line, input);
+        try stream.objectField("output");
+        try stream.beginObject();
+        try stream.objectField("valid");
+        try stream.write(false);
+        try stream.objectField("errors");
+        try stream.beginArray();
+        for (groups) |failures| for (failures) |failure| try stream.write(validation.Failure{
+            .instanceLocation = stripFragment(failure.instanceLocation),
+            .keywordLocation = stripFragment(failure.keywordLocation),
+            .@"error" = failure.@"error",
+        });
+        try stream.endArray();
+        try stream.endObject();
+        try stream.endObject();
+    }
+
+    fn writeFitPatch(
+        self: Diagnostics,
+        stream: *std.json.Stringify,
+        line: usize,
+        input: record.Record,
+        groups: []const []const fit.Change,
+    ) std.json.Stringify.Error!void {
+        try self.writeHead(stream, "fit", line, input);
+        try stream.objectField("patch");
+        try stream.beginArray();
+        for (groups) |changes| for (changes) |change| {
+            try stream.beginObject();
+            try stream.objectField("op");
+            try stream.write(switch (change.rule) {
+                .defaults => "add",
+                .drop_extra => "remove",
+                .coerce, .wrap => "replace",
+            });
+            try stream.objectField("path");
+            try stream.write(change.path);
+            if (change.rule != .drop_extra) {
+                try stream.objectField("value");
+                try writeRaw(stream, change.after orelse "null");
+            }
+            try stream.endObject();
+        };
+        try stream.endArray();
+        try stream.endObject();
+    }
+
+    fn writeHead(
+        self: Diagnostics,
+        stream: *std.json.Stringify,
+        kind: []const u8,
+        line: ?usize,
+        input: ?record.Record,
+    ) std.json.Stringify.Error!void {
+        try stream.beginObject();
+        try stream.objectField("command");
+        try stream.write(self.command);
+        try stream.objectField("kind");
+        try stream.write(kind);
+        if (line) |number| {
+            try stream.objectField("line");
+            try stream.write(number);
+        }
+        const parsed = input orelse return;
+        if (record.field(parsed.document.root, "topic")) |topic| if (topic.value == .string) {
+            try stream.objectField("topic");
+            try stream.write(topic.value.string);
+        };
+        for ([_][]const u8{ "partition", "offset" }) |name| {
+            if (record.field(parsed.document.root, name)) |node| {
+                try stream.objectField(name);
+                try writeRaw(stream, record.raw(parsed.document, node));
+            }
+        }
+    }
+
+    fn writeRaw(stream: *std.json.Stringify, json_text: []const u8) std.json.Stringify.Error!void {
+        try stream.beginWriteRaw();
+        try stream.writer.writeAll(json_text);
+        stream.endWriteRaw();
+    }
+
+    fn stripFragment(location: []const u8) []const u8 {
+        return if (std.mem.startsWith(u8, location, "#")) location[1..] else location;
+    }
+};
 
 pub fn stringOf(value: std.json.Value) ?[]const u8 {
     return registry_mod.stringValue(value);

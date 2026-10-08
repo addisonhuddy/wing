@@ -624,14 +624,12 @@ fn pushFinding(
 ) !void {
     const message = try std.fmt.allocPrint(alloc, fmt, args);
     if (global.errors_json) {
-        std.debug.print("{{\"command\":\"push\",\"kind\":\"invalid\",\"output\":{{\"valid\":false,\"errors\":[", .{});
-        var first = true;
-        app.emitValidationFailureJson(.{
+        const failure: validator.Failure = .{
             .instanceLocation = jsonPointer(instance_location),
             .keywordLocation = jsonPointer(keyword_location),
             .@"error" = message,
-        }, &first);
-        std.debug.print("]}}}}\n", .{});
+        };
+        app.Diagnostics.init("push", global).invalid(null, null, &.{&.{failure}});
     } else {
         pushStderr("{s}", .{message});
     }

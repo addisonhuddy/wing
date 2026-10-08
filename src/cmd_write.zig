@@ -51,11 +51,15 @@ const Resolver = struct {
         const version_request = parsed.version orelse "latest";
         if (self.settings.urls.len == 0)
             fatalLine(self.global, line, "no Schema Registry configured; pass --registry URL, set SCHEMA_REGISTRY_URL, or run wing registry init");
-        const subject = try app.subjectForTopic(self.alloc, topic, key);
-        const lookup_key = try std.fmt.allocPrint(self.alloc, "{s}:{s}@{s}", .{
-            if (key) "key" else "value", subject, version_request,
+        var probe_memory = std.heap.stackFallback(512, self.alloc);
+        const probe = probe_memory.get();
+        const probe_subject = try app.subjectForTopic(probe, topic, key);
+        const probe_key = try std.fmt.allocPrint(probe, "{s}:{s}@{s}", .{
+            if (key) "key" else "value", probe_subject, version_request,
         });
-        if (self.lookups.get(lookup_key)) |found| return found.?;
+        if (self.lookups.get(probe_key)) |found| return found.?;
+        const subject = try self.alloc.dupe(u8, probe_subject);
+        const lookup_key = try self.alloc.dupe(u8, probe_key);
         const versions = self.registry.versions(subject) catch |err| {
             if (self.registry.last_status == 404)
                 fatalFmt(self, "no schema for topic '{s}' (subject {s} not found in {s})", .{
@@ -88,9 +92,13 @@ const Resolver = struct {
     fn latestKey(self: *Resolver, topic: []const u8, line: usize) !?*Info {
         if (self.settings.urls.len == 0)
             fatalLine(self.global, line, "a REF requires a configured Schema Registry to select its key schema");
-        const subject = try app.subjectForTopic(self.alloc, topic, true);
-        const lookup_key = try std.fmt.allocPrint(self.alloc, "key:{s}@latest", .{subject});
-        if (self.lookups.get(lookup_key)) |found| return found;
+        var probe_memory = std.heap.stackFallback(512, self.alloc);
+        const probe = probe_memory.get();
+        const probe_subject = try app.subjectForTopic(probe, topic, true);
+        const probe_key = try std.fmt.allocPrint(probe, "key:{s}@latest", .{probe_subject});
+        if (self.lookups.get(probe_key)) |found| return found;
+        const subject = try self.alloc.dupe(u8, probe_subject);
+        const lookup_key = try self.alloc.dupe(u8, probe_key);
         const versions = self.registry.versions(subject) catch |err| {
             if (self.registry.last_status == 404) {
                 try self.lookups.put(self.alloc, lookup_key, null);
@@ -115,13 +123,18 @@ const Resolver = struct {
         return info;
     }
 
-    fn resolveGuid(self: *Resolver, guid: []const u8, key: bool, requested_topic: ?[]const u8, line: usize) !*Info {
+    fn resolveGuid(self: *Resolver, record_guid: []const u8, key: bool, record_topic: ?[]const u8, line: usize) !*Info {
         const role = if (key) "key" else "value";
-        const topic_name = requested_topic orelse "";
-        const cache_key = try std.fmt.allocPrint(self.alloc, "guid:{s}:{s}:{d}:{s}", .{
-            guid, role, topic_name.len, topic_name,
+        const topic_name: []const u8 = record_topic orelse "";
+        var probe_memory = std.heap.stackFallback(512, self.alloc);
+        const probe_key = try std.fmt.allocPrint(probe_memory.get(), "guid:{s}:{s}:{d}:{s}", .{
+            record_guid, role, topic_name.len, topic_name,
         });
-        if (self.schemas.get(cache_key)) |found| return found;
+        if (self.schemas.get(probe_key)) |found| return found;
+        // Record text lives in the per-record arena; keep owned copies in the cache.
+        const cache_key = try self.alloc.dupe(u8, probe_key);
+        const guid = try self.alloc.dupe(u8, record_guid);
+        const requested_topic = if (record_topic) |topic| try self.alloc.dupe(u8, topic) else null;
         var value: std.json.Value = undefined;
         var subject: ?[]const u8 = null;
         var version: ?[]const u8 = null;
@@ -342,7 +355,7 @@ pub fn run(init: std.process.Init, global: cli.Global, args: []const []const u8)
             const selected = selection_info orelse try resolver.resolve(ref, false, line_number);
             selection_info = selected;
             if (selected.topic) |topic| {
-                missing_key_subject = try app.subjectForTopic(alloc, topic, true);
+                missing_key_subject = try app.subjectForTopic(line_alloc, topic, true);
                 key_info = try resolver.latestKey(topic, line_number);
             }
         } else if (selection_info == null) {
@@ -673,41 +686,26 @@ fn noteSelection(
 ) void {
     const key_name = if (key) |info| info.subject else missing_key_subject orelse "";
     const key_version = if (key) |info| info.version else "no subject";
-    const message = std.fmt.allocPrint(alloc, "{s}@{s}|{s}@{s}", .{
+    var probe_memory = std.heap.stackFallback(512, alloc);
+    const probe = std.fmt.allocPrint(probe_memory.get(), "{s}@{s}|{s}@{s}", .{
         value.subject, value.version, key_name, key_version,
     }) catch return;
-    if (reported.contains(message)) return;
-    reported.put(alloc, message, {}) catch return;
-    if (!global.quiet) {
-        const selection = if (key) |info|
-            std.fmt.allocPrint(alloc, "using {s} version {s}, {s} version {s}", .{
-                value.subject, value.version, info.subject, info.version,
-            }) catch "using schemas"
-        else if (missing_key_subject) |subject|
-            std.fmt.allocPrint(alloc, "using {s} version {s}, no {s} subject", .{
-                value.subject, value.version, subject,
-            }) catch "using schema"
-        else
-            std.fmt.allocPrint(alloc, "using {s} version {s}, no key schema", .{
-                value.subject, value.version,
-            }) catch "using schema";
-        const prefixed = std.fmt.allocPrint(alloc, "wing write: {s}", .{selection}) catch selection;
-        if (global.errors_json) emitNoteJson(prefixed) else std.debug.print("{s}\n", .{prefixed});
-    }
-}
-
-fn emitNoteJson(message: []const u8) void {
-    var output = std.Io.Writer.Allocating.init(std.heap.page_allocator);
-    std.json.Stringify.value(message, .{}, &output.writer) catch {};
-    std.debug.print("{{\"command\":\"write\",\"kind\":\"note\",\"message\":{s}}}\n", .{output.written()});
+    if (reported.contains(probe)) return;
+    reported.put(alloc, alloc.dupe(u8, probe) catch return, {}) catch return;
+    if (global.quiet) return;
+    const diagnostics = app.Diagnostics.init("write", global);
+    if (key) |info|
+        diagnostics.notef("wing write: using {s} version {s}, {s} version {s}", .{
+            value.subject, value.version, info.subject, info.version,
+        })
+    else if (missing_key_subject) |subject|
+        diagnostics.notef("wing write: using {s} version {s}, no {s} subject", .{ value.subject, value.version, subject })
+    else
+        diagnostics.notef("wing write: using {s} version {s}, no key schema", .{ value.subject, value.version });
 }
 
 fn writeNote(global: cli.Global, message: []const u8) void {
-    if (global.errors_json) {
-        emitNoteJson(message);
-    } else {
-        std.debug.print("{s}\n", .{message});
-    }
+    app.Diagnostics.init("write", global).note(message);
 }
 
 fn warnRuleSet(
@@ -727,12 +725,7 @@ fn warnRuleSet(
     }
     if (!active or reported.contains(info.guid)) return;
     try reported.put(alloc, info.guid, {});
-    const message = try std.fmt.allocPrint(alloc, "wing write: schema {s} has rules that wing does not run", .{info.guid});
-    if (global.errors_json) {
-        emitNoteJson(message);
-    } else {
-        std.debug.print("{s}\n", .{message});
-    }
+    app.Diagnostics.init("write", global).notef("wing write: schema {s} has rules that wing does not run", .{info.guid});
 }
 
 fn logChanges(
@@ -743,19 +736,24 @@ fn logChanges(
     dropped: *std.StringHashMapUnmanaged(usize),
     rule_counts: *[4]usize,
 ) !void {
+    const diagnostics = app.Diagnostics.init("write", global);
     for (changes) |change| {
         rule_counts[@intFromEnum(change.rule)] += 1;
         if (change.rule == .drop_extra) {
-            const count = dropped.get(change.path) orelse 0;
-            try dropped.put(alloc, change.path, count + 1);
+            const entry = try dropped.getOrPut(alloc, change.path);
+            if (!entry.found_existing) {
+                entry.key_ptr.* = try alloc.dupe(u8, change.path);
+                entry.value_ptr.* = 0;
+            }
+            entry.value_ptr.* += 1;
         }
         if (global.verbose) {
             switch (change.rule) {
-                .drop_extra => std.debug.print("wing write: line {d}: {s} removed (drop-extra)\n", .{ line, change.path }),
-                .defaults => std.debug.print("wing write: line {d}: {s} set to {s} (default)\n", .{
+                .drop_extra => diagnostics.print("wing write: line {d}: {s} removed (drop-extra)", .{ line, change.path }),
+                .defaults => diagnostics.print("wing write: line {d}: {s} set to {s} (default)", .{
                     line, change.path, change.after orelse "null",
                 }),
-                .coerce, .wrap => std.debug.print("wing write: line {d}: {s} {s} -> {s} ({s})\n", .{
+                .coerce, .wrap => diagnostics.print("wing write: line {d}: {s} {s} -> {s} ({s})", .{
                     line,
                     change.path,
                     change.before orelse "null",
@@ -767,33 +765,13 @@ fn logChanges(
     }
 }
 
-fn emitRecordPatch(line: usize, input: record.Record, value: []const fit.Change, key: ?Part) void {
-    const key_changes = if (key) |part| part.changes else &.{};
-    if (value.len == 0 and key_changes.len == 0) return;
-    std.debug.print("{{\"command\":\"write\",\"kind\":\"fit\",\"line\":{d}", .{line});
-    emitRecordPosition(input);
-    std.debug.print(",\"patch\":[", .{});
-    var first = true;
-    emitPatchChanges(value, &first);
-    emitPatchChanges(key_changes, &first);
-    std.debug.print("]}}\n", .{});
-}
+const json_diagnostics: app.Diagnostics = .{ .command = "write", .json = true };
+const text_diagnostics: app.Diagnostics = .{ .command = "write", .json = false };
 
-fn emitPatchChanges(changes: []const fit.Change, first: *bool) void {
-    for (changes) |change| {
-        if (!first.*) std.debug.print(",", .{});
-        first.* = false;
-        const op = if (change.rule == .defaults) "add" else if (change.rule == .drop_extra) "remove" else "replace";
-        std.debug.print("{{\"op\":\"{s}\",\"path\":", .{op});
-        var output = std.Io.Writer.Allocating.init(std.heap.page_allocator);
-        std.json.Stringify.value(change.path, .{}, &output.writer) catch {};
-        std.debug.print("{s}", .{output.written()});
-        if (change.rule != .drop_extra) {
-            const value = change.after orelse "null";
-            std.debug.print(",\"value\":{s}", .{value});
-        }
-        std.debug.print("}}", .{});
-    }
+fn emitRecordPatch(line: usize, input: record.Record, value: []const fit.Change, key: ?Part) void {
+    const key_changes: []const fit.Change = if (key) |part| part.changes else &.{};
+    if (value.len == 0 and key_changes.len == 0) return;
+    json_diagnostics.fitPatch(line, input, &.{ value, key_changes });
 }
 
 fn printSummary(
@@ -808,38 +786,41 @@ fn printSummary(
     rules: [4]usize,
 ) void {
     if (global.quiet) return;
+    const diagnostics = app.Diagnostics.init("write", global);
     if (global.errors_json) {
-        std.debug.print(
-            "{{\"command\":\"write\",\"kind\":\"summary\",\"read\":{d},\"passed\":{d},\"failed\":{d},\"empty\":{d},\"fit\":{{\"coerce\":{d},\"defaults\":{d},\"drop-extra\":{d},\"wrap\":{d}}},\"written\":{d},\"fitted\":{d}}}\n",
-            .{ read_count, passed, failed, empty, rules[0], rules[1], rules[2], rules[3], written, fitted },
-        );
-    } else {
-        std.debug.print("wing write: {d} written, {d} fitted", .{ written, fitted });
-        if (fit_enabled) {
-            const names = [_][]const u8{ "coerce", "defaults", "drop-extra", "wrap" };
-            var first = true;
-            for (rules, names) |count, name| {
-                if (count == 0) continue;
-                std.debug.print("{s}{s} {d}", .{ if (first) " (" else ", ", name, count });
-                first = false;
-            }
-            if (!first) std.debug.print(")", .{});
+        diagnostics.value(.{
+            .command = "write",
+            .kind = "summary",
+            .read = read_count,
+            .passed = passed,
+            .failed = failed,
+            .empty = empty,
+            .fit = .{ .coerce = rules[0], .defaults = rules[1], .@"drop-extra" = rules[2], .wrap = rules[3] },
+            .written = written,
+            .fitted = fitted,
+        });
+        return;
+    }
+    const writer = diagnostics.begin();
+    defer diagnostics.end(writer);
+    writer.print("wing write: {d} written, {d} fitted", .{ written, fitted }) catch {};
+    if (fit_enabled) {
+        const names = [_][]const u8{ "coerce", "defaults", "drop-extra", "wrap" };
+        var first = true;
+        for (rules, names) |count, name| {
+            if (count == 0) continue;
+            writer.print("{s}{s} {d}", .{ if (first) " (" else ", ", name, count }) catch {};
+            first = false;
         }
-        std.debug.print("\n", .{});
+        if (!first) writer.writeByte(')') catch {};
     }
 }
 
 fn printDropNotes(dropped: std.StringHashMapUnmanaged(usize), global: cli.Global) void {
+    const diagnostics = app.Diagnostics.init("write", global);
     var iterator = dropped.iterator();
-    while (iterator.next()) |entry| {
-        if (global.errors_json) {
-            emitNoteJson(std.fmt.allocPrint(std.heap.page_allocator, "wing write: drop-extra removed {s} from {d} records", .{
-                entry.key_ptr.*, entry.value_ptr.*,
-            }) catch "wing write: drop-extra removed records");
-        } else {
-            std.debug.print("wing write: drop-extra removed {s} from {d} records\n", .{ entry.key_ptr.*, entry.value_ptr.* });
-        }
-    }
+    while (iterator.next()) |entry|
+        diagnostics.notef("wing write: drop-extra removed {s} from {d} records", .{ entry.key_ptr.*, entry.value_ptr.* });
 }
 
 fn printFailures(line: usize, value: []const validate.Failure, key: ?Part, key_info: ?*Info) void {
@@ -854,7 +835,9 @@ fn printFailures(line: usize, value: []const validate.Failure, key: ?Part, key_i
 fn printKeyFailure(line: usize, subject: []const u8, version: []const u8, failure: validate.Failure) void {
     const path = if (std.mem.startsWith(u8, failure.instanceLocation, "#")) failure.instanceLocation[1..] else failure.instanceLocation;
     const keyword = if (std.mem.startsWith(u8, failure.keywordLocation, "#")) failure.keywordLocation[1..] else failure.keywordLocation;
-    std.debug.print("wing write: line {d}: key failed {s} version {s} (keys are validated because {s} exists): {s}{s}{s}", .{
+    const writer = text_diagnostics.begin();
+    defer text_diagnostics.end(writer);
+    writer.print("wing write: line {d}: key failed {s} version {s} (keys are validated because {s} exists): {s}{s}{s}", .{
         line,
         subject,
         version,
@@ -862,50 +845,29 @@ fn printKeyFailure(line: usize, subject: []const u8, version: []const u8, failur
         path,
         if (path.len > 0) ": " else "",
         failure.@"error",
-    });
-    if (keyword.len > 0) std.debug.print(" [{s}]", .{keyword});
-    std.debug.print("\n", .{});
+    }) catch {};
+    if (keyword.len > 0) writer.print(" [{s}]", .{keyword}) catch {};
 }
 
 fn printOneFailure(line: usize, prefix: []const u8, failure: validate.Failure, suffix: ?[]const u8) void {
     const path = if (std.mem.startsWith(u8, failure.instanceLocation, "#")) failure.instanceLocation[1..] else failure.instanceLocation;
     const keyword = if (std.mem.startsWith(u8, failure.keywordLocation, "#")) failure.keywordLocation[1..] else failure.keywordLocation;
-    std.debug.print("wing write: line {d}: {s}{s}{s}{s}", .{
+    const writer = text_diagnostics.begin();
+    defer text_diagnostics.end(writer);
+    writer.print("wing write: line {d}: {s}{s}{s}{s}", .{
         line,
         prefix,
         path,
         if (path.len > 0) ": " else "",
         failure.@"error",
-    });
-    if (keyword.len > 0) std.debug.print(" [{s}]", .{keyword});
-    if (suffix) |text| std.debug.print(": {s}", .{text});
-    std.debug.print("\n", .{});
+    }) catch {};
+    if (keyword.len > 0) writer.print(" [{s}]", .{keyword}) catch {};
+    if (suffix) |text| writer.print(": {s}", .{text}) catch {};
 }
 
 fn emitErrorJson(line: usize, input: record.Record, value: []const validate.Failure, key: ?Part) void {
-    std.debug.print("{{\"command\":\"write\",\"kind\":\"invalid\",\"line\":{d}", .{line});
-    emitRecordPosition(input);
-    std.debug.print(",\"output\":{{\"valid\":false,\"errors\":[", .{});
-    var first = true;
-    for (value) |failure| {
-        app.emitValidationFailureJson(failure, &first);
-    }
-    if (key) |part| for (part.failures) |failure| app.emitValidationFailureJson(failure, &first);
-    std.debug.print("]}}}}\n", .{});
-}
-
-fn emitRecordPosition(input: record.Record) void {
-    if (record.field(input.document.root, "topic")) |topic| {
-        if (topic.value == .string) {
-            var output = std.Io.Writer.Allocating.init(std.heap.page_allocator);
-            std.json.Stringify.value(topic.value.string, .{}, &output.writer) catch {};
-            std.debug.print(",\"topic\":{s}", .{output.written()});
-        }
-    }
-    if (record.field(input.document.root, "partition")) |partition|
-        std.debug.print(",\"partition\":{s}", .{record.raw(input.document, partition)});
-    if (record.field(input.document.root, "offset")) |offset|
-        std.debug.print(",\"offset\":{s}", .{record.raw(input.document, offset)});
+    const key_failures: []const validate.Failure = if (key) |part| part.failures else &.{};
+    json_diagnostics.invalid(line, input, &.{ value, key_failures });
 }
 
 fn writeLine(
@@ -948,7 +910,10 @@ fn fatalFmt(resolver: *Resolver, comptime fmt: []const u8, args: anytype) noretu
 }
 
 fn fatalLine(global: cli.Global, line: usize, message: []const u8) noreturn {
-    const full = std.fmt.allocPrint(std.heap.page_allocator, "wing write: line {d}: {s}", .{ line, message }) catch message;
+    var buffer: [2048]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    writer.print("wing write: line {d}: {s}", .{ line, message }) catch {};
+    const full = writer.buffered();
     if (global.errors_json) app.fatal(full, true, "write");
     std.debug.print("{s}\n", .{full});
     std.process.exit(1);
