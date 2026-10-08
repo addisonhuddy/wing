@@ -28,3 +28,4 @@ binary="$repo_root/zig-out/bin/wing"
 for draft in draft4 draft6 draft7 draft2019-09 draft2020-12; do
   "$binary" _jsts "$suite_dir/tests/$draft" --draft "$draft"
 done
+"$binary" _fitprops "$suite_dir/tests/draft7"

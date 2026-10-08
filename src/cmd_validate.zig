@@ -2,6 +2,7 @@ const std = @import("std");
 const jv = @import("jv.zig");
 const schema = @import("schema/compile.zig");
 const validator = @import("schema/validate.zig");
+const fitter = @import("schema/fit.zig");
 const regex = @import("regex.zig");
 const app = @import("app.zig");
 const record_io = @import("record_io.zig");
@@ -60,7 +61,7 @@ pub fn validateCommand(init: std.process.Init, args: []const []const u8) !noretu
         };
         const errors = try validator.validate(record_alloc, &plan, instance.root, .{});
         if (errors.len == 0) {
-            record_io.writeLine(&writer.interface, "valid") catch
+            writer.interface.writeAll("valid\n") catch
                 app.fatal("failed writing stdout", false, "_validate");
         } else {
             invalid = true;
@@ -123,6 +124,154 @@ pub fn jstsCommand(init: std.process.Init, args: []const []const u8) !noreturn {
         app.stderr("optional/{s}: {d}/{d} passed (informational)", .{ draftName(draft), optional_total - optional_failed, optional_total });
     } else |_| {}
     std.process.exit(if (required_failed == 0) 0 else 1);
+}
+
+pub fn fitPropertiesCommand(init: std.process.Init, args: []const []const u8) !noreturn {
+    const alloc = init.arena.allocator();
+    if (args.len != 1) usage();
+    const tests_path = args[0];
+    const test_dir = std.Io.Dir.cwd().openDir(init.io, tests_path, .{ .iterate = true }) catch {
+        app.stderr("cannot read JSON-Schema-Test-Suite draft directory '{s}'", .{tests_path});
+        std.process.exit(1);
+    };
+    defer test_dir.close(init.io);
+    const suite_root = try std.fs.path.join(alloc, &.{ tests_path, "..", ".." });
+    const remote_path = try std.fs.path.join(alloc, &.{ suite_root, "remotes" });
+    const resources = loadResources(init, alloc, remote_path, "http://localhost:1234/") catch &.{};
+    var iter = test_dir.iterate();
+    var valid_count: usize = 0;
+    var mutated_count: usize = 0;
+    var fitted_mutations: usize = 0;
+    var failures: usize = 0;
+    while (try iter.next(init.io)) |entry| {
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".json")) continue;
+        const source = try test_dir.readFileAlloc(init.io, entry.name, alloc, .limited(16 * 1024 * 1024));
+        const file_doc = jv.parse(alloc, source) catch continue;
+        if (file_doc.root.value != .array) continue;
+        for (file_doc.root.value.array) |group| {
+            const schema_node = objectField(group, "schema") orelse continue;
+            const schema_doc = jv.Document{ .root = @constCast(schema_node), .source = source };
+            const plan = schema.compile(alloc, schema_doc, .{ .default_draft = .draft07, .extra_resources = resources }) catch continue;
+            const tests = objectField(group, "tests") orelse continue;
+            if (tests.value != .array) continue;
+            for (tests.value.array) |case| {
+                const expected = objectField(case, "valid") orelse continue;
+                if (expected.value != .boolean or !expected.value.boolean) continue;
+                const original = objectField(case, "data") orelse objectField(case, "instance") orelse continue;
+                var record_arena = std.heap.ArenaAllocator.init(alloc);
+                const record_alloc = record_arena.allocator();
+
+                const before = try jv.stringify(record_alloc, original);
+                const valid_copy = try cloneInstance(record_alloc, original);
+                const fitted = try fitter.apply(record_alloc, &plan, valid_copy);
+                const after = try jv.stringify(record_alloc, fitted.node);
+                if (!std.mem.eql(u8, before, after) or fitted.changes.len != 0 or
+                    (try validator.validate(record_alloc, &plan, fitted.node, .{})).len != 0)
+                {
+                    failures += 1;
+                    app.stderr("fit property failed for valid instance in {s}", .{entry.name});
+                } else {
+                    valid_count += 1;
+                }
+                const again = try fitter.apply(record_alloc, &plan, fitted.node);
+                if (again.changes.len != 0) {
+                    failures += 1;
+                    app.stderr("fit idempotence failed for {s}", .{entry.name});
+                }
+
+                const mutated = try cloneInstance(record_alloc, original);
+                if (mutateInstance(record_alloc, mutated)) {
+                    mutated_count += 1;
+                    const mutation_fit = try fitter.apply(record_alloc, &plan, mutated);
+                    const output_errors = try validator.validate(record_alloc, &plan, mutation_fit.node, .{});
+                    if (output_errors.len == 0) {
+                        fitted_mutations += 1;
+                        const second = try fitter.apply(record_alloc, &plan, mutation_fit.node);
+                        if (second.changes.len != 0 or
+                            (try validator.validate(record_alloc, &plan, second.node, .{})).len != 0)
+                        {
+                            failures += 1;
+                            app.stderr("fit mutation property failed for {s}", .{entry.name});
+                        }
+                    }
+                }
+                record_arena.deinit();
+            }
+        }
+    }
+    app.stderr("fit draft7 properties: {d} valid, {d} mutated ({d} fitted-valid)", .{ valid_count, mutated_count, fitted_mutations });
+    std.process.exit(if (valid_count == 0 or failures != 0) 1 else 0);
+}
+
+fn cloneInstance(alloc: std.mem.Allocator, source: *const jv.Node) !*jv.Node {
+    const clone = try alloc.create(jv.Node);
+    clone.* = source.*;
+    switch (source.value) {
+        .object => |members| {
+            const copied = try alloc.alloc(jv.Member, members.len);
+            for (members, 0..) |member, index| copied[index] = .{
+                .key = member.key,
+                .value = try cloneInstance(alloc, member.value),
+            };
+            clone.value = .{ .object = copied };
+        },
+        .array => |values| {
+            const copied = try alloc.alloc(*jv.Node, values.len);
+            for (values, 0..) |value, index| copied[index] = try cloneInstance(alloc, value);
+            clone.value = .{ .array = copied };
+        },
+        else => {},
+    }
+    return clone;
+}
+
+fn mutateInstance(alloc: std.mem.Allocator, value: *jv.Node) bool {
+    switch (value.value) {
+        .object => |members| {
+            const copied = alloc.alloc(jv.Member, members.len) catch return false;
+            @memcpy(copied, members);
+            if (members.len > 0) {
+                const replacement = alloc.create(jv.Node) catch return false;
+                replacement.* = .{ .value = .{ .string = "__fit_mutation__" }, .span = .{ .start = 0, .end = 0 } };
+                copied[0].value = replacement;
+                value.value = .{ .object = copied };
+                return true;
+            }
+            const key = alloc.dupe(u8, "__fit_mutation__") catch return false;
+            const item = alloc.create(jv.Node) catch return false;
+            item.* = .{ .value = .{ .boolean = true }, .span = .{ .start = 0, .end = 0 } };
+            const extended = alloc.alloc(jv.Member, 1) catch return false;
+            extended[0] = .{ .key = key, .value = item };
+            value.value = .{ .object = extended };
+            return true;
+        },
+        .array => |values| {
+            if (values.len == 0) return false;
+            const copied = alloc.alloc(*jv.Node, values.len) catch return false;
+            @memcpy(copied, values);
+            const replacement = alloc.create(jv.Node) catch return false;
+            replacement.* = .{ .value = .{ .string = "__fit_mutation__" }, .span = .{ .start = 0, .end = 0 } };
+            copied[0] = replacement;
+            value.value = .{ .array = copied };
+            return true;
+        },
+        .string => {
+            value.value = .{ .string = "__fit_mutation__" };
+            return true;
+        },
+        .number => |text| {
+            value.value = .{ .string = text };
+            return true;
+        },
+        .boolean => |boolean| {
+            value.value = .{ .string = if (boolean) "true" else "false" };
+            return true;
+        },
+        .null_value => {
+            value.value = .{ .string = "null" };
+            return true;
+        },
+    }
 }
 
 const SuiteResult = struct { total: usize = 0, failed: usize = 0 };

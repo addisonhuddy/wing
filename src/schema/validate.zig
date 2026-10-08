@@ -78,9 +78,19 @@ pub fn validate(
     instance: *const jv.Node,
     options: Options,
 ) ![]Failure {
+    return validateSubschema(alloc, plan, plan.root, instance, options);
+}
+
+pub fn validateSubschema(
+    alloc: std.mem.Allocator,
+    plan: *const compile_mod.Plan,
+    schema: *const compile_mod.Node,
+    instance: *const jv.Node,
+    options: Options,
+) ![]Failure {
     var context: Context = .{ .alloc = alloc, .plan = plan, .verbose = options.verbose };
     const root_path = InstancePath{};
-    try visit(&context, plan.root, instance, &root_path);
+    try visit(&context, schema, instance, &root_path);
     return context.errors.toOwnedSlice(alloc);
 }
 

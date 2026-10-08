@@ -22,6 +22,9 @@ pub fn main(init: std.process.Init) !void {
     if (argv.len > 1 and std.mem.eql(u8, argv[1], "_jsts")) {
         try cmd_validate.jstsCommand(init, argv[2..]);
     }
+    if (argv.len > 1 and std.mem.eql(u8, argv[1], "_fitprops")) {
+        try cmd_validate.fitPropertiesCommand(init, argv[2..]);
+    }
     if (argv.len == 2 and (std.mem.eql(u8, argv[1], "-V") or std.mem.eql(u8, argv[1], "--version"))) {
         app.writeStdout(init.io, "wing " ++ cli.version ++ "\n", false, "");
         return;
@@ -46,9 +49,9 @@ pub fn main(init: std.process.Init) !void {
     if (std.mem.eql(u8, invocation.command, "ls")) try cmd_ls.run(init, invocation.global, invocation.args) else if (std.mem.eql(u8, invocation.command, "get")) try cmd_get.run(init, invocation.global, invocation.args) else if (std.mem.eql(u8, invocation.command, "rm")) try cmd_rm.run(init, invocation.global, invocation.args) else if (std.mem.eql(u8, invocation.command, "registry")) try cmd_registry.run(init, invocation.global, invocation.args) else if (std.mem.eql(u8, invocation.command, "read")) {
         try cmd_read.run(init, invocation.global, invocation.args);
     } else if (std.mem.eql(u8, invocation.command, "write")) {
-        cmd_write.run(invocation.global);
+        try cmd_write.run(init, invocation.global, invocation.args);
     } else if (std.mem.eql(u8, invocation.command, "push")) {
-        cmd_push.run(invocation.global);
+        try cmd_push.run(init, invocation.global, invocation.args);
     } else if (std.mem.eql(u8, invocation.command, "update")) {
         cmd_update.run(init, invocation.global, invocation.args, alloc);
     } else {
