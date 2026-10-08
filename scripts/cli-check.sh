@@ -444,6 +444,23 @@ set -e
     exit 1
 }
 echo "PASS write-stop-on-invalid"
+# Diagnostics must not allocate per record: 100k failing records with
+# --errors=json stay under a 64 MiB address-space limit (issue #4).
+awk 'BEGIN { for (i = 0; i < 100000; i++) print "{\"topic\":\"offline\",\"value\":\"{}\",\"schema\":{\"value\":{\"guid\":\"22222222-2222-2222-2222-222222222222\"}}}" }' >"$TMP/many-invalid.jsonl"
+set +e
+(cd "$TMP/cache-work" && ulimit -v 65536 &&
+    "$BIN" --schema-dir "$TMP/schema-cache" --errors=json write --check \
+        <"$TMP/many-invalid.jsonl" >/dev/null 2>"$TMP/many-invalid.err")
+many_status=$?
+set -e
+if [ "$many_status" -ne 2 ] ||
+    [ "$(grep -c '"kind":"invalid","line":[0-9]*,"topic":"offline","output"' "$TMP/many-invalid.err")" -ne 100000 ] ||
+    ! tail -n 1 "$TMP/many-invalid.err" | grep -Fq '"kind":"summary","read":100000,"passed":0,"failed":100000'; then
+    echo "FAIL write-errors-json-bounded-memory: exit $many_status"
+    tail -n 3 "$TMP/many-invalid.err"
+    exit 1
+fi
+echo "PASS write-errors-json-bounded-memory"
 run_read_input_case write-check-unchanged 2 identical "missing required property 'x'" \
     "$invalid_write_record" --workdir "$TMP/cache-work" --schema-dir "$TMP/schema-cache" write --check
 run_read_input_case write-check-passes 0 empty "0 fitted" \

@@ -35,8 +35,10 @@ const Resolver = struct {
     warned_rules: std.StringHashMapUnmanaged(void) = .empty,
 
     fn resolve(self: *Resolver, prefix: header.Prefix, key: bool, topic: ?[]const u8, line_number: usize) !*SchemaInfo {
-        const schema_key = try self.prefixKey(prefix, key, topic);
-        if (self.schemas.get(schema_key)) |found| return found;
+        var probe_memory = std.heap.stackFallback(512, self.alloc);
+        const probe_key = try prefixKey(probe_memory.get(), prefix, key, topic);
+        if (self.schemas.get(probe_key)) |found| return found;
+        const schema_key = try self.alloc.dupe(u8, probe_key);
 
         var schema_value: std.json.Value = undefined;
         var subject: ?[]const u8 = null;
@@ -181,17 +183,17 @@ const Resolver = struct {
         return info;
     }
 
-    fn prefixKey(self: *Resolver, prefix: header.Prefix, key: bool, topic: ?[]const u8) ![]const u8 {
+    fn prefixKey(alloc: std.mem.Allocator, prefix: header.Prefix, key: bool, topic: ?[]const u8) ![]const u8 {
         const role = if (key) "key" else "value";
         const topic_name = topic orelse "";
         return switch (prefix) {
             .guid => |bytes| blk: {
                 var formatted: [36]u8 = undefined;
-                break :blk try std.fmt.allocPrint(self.alloc, "guid:{s}:{s}:{d}:{s}", .{
+                break :blk try std.fmt.allocPrint(alloc, "guid:{s}:{s}:{d}:{s}", .{
                     header.formatGuid(bytes, &formatted), role, topic_name.len, topic_name,
                 });
             },
-            .id => |id| try std.fmt.allocPrint(self.alloc, "id:{d}:{s}:{d}:{s}", .{
+            .id => |id| try std.fmt.allocPrint(alloc, "id:{d}:{s}:{d}:{s}", .{
                 id, role, topic_name.len, topic_name,
             }),
         };
@@ -324,7 +326,7 @@ pub fn run(init: std.process.Init, global: cli.Global, args: []const []const u8)
         if (record_failed) {
             failed += 1;
             if (global.errors_json) {
-                try printJsonInvalid(record_alloc, line_number, input_record, value_result.errors, key_result);
+                printJsonInvalid(line_number, input_record, value_result.errors, key_result);
             } else {
                 printTextErrors(record_alloc, line_number, input_record, value_result.errors, key_result);
             }
@@ -349,12 +351,18 @@ pub fn run(init: std.process.Init, global: cli.Global, args: []const []const u8)
     output.interface.flush() catch |err| outputFailure(err, global.errors_json);
     const stopped_by_signal = interrupted.load(.acquire);
     if (!global.quiet) {
+        const diagnostics = app.Diagnostics.init("read", global);
         if (global.errors_json) {
-            std.debug.print("{{\"command\":\"read\",\"kind\":\"summary\",\"read\":{d},\"passed\":{d},\"failed\":{d},\"empty\":{d}}}\n", .{
-                read_count, passed, failed, empty,
+            diagnostics.value(.{
+                .command = "read",
+                .kind = "summary",
+                .read = read_count,
+                .passed = passed,
+                .failed = failed,
+                .empty = empty,
             });
         } else {
-            std.debug.print("wing read: {d} read, {d} passed, {d} failed{s}\n", .{
+            diagnostics.print("wing read: {d} read, {d} passed, {d} failed{s}", .{
                 read_count,
                 passed,
                 failed,
@@ -666,57 +674,24 @@ fn printTextErrors(
 fn printOneTextError(line_number: usize, position: []const u8, prefix: []const u8, failure: schema_validate.Failure, context: ?[]const u8) void {
     const instance = displayPath(failure.instanceLocation);
     const keyword = displayPath(failure.keywordLocation);
-    std.debug.print("wing read: line {d}{s}: {s}{s}{s}{s}", .{
+    const diagnostics: app.Diagnostics = .{ .command = "read", .json = false };
+    const writer = diagnostics.begin();
+    defer diagnostics.end(writer);
+    writer.print("wing read: line {d}{s}: {s}{s}{s}{s}", .{
         line_number, position, prefix, if (instance.len > 0) instance else "", if (instance.len > 0) ": " else "", failure.@"error",
-    });
-    if (keyword.len > 0) std.debug.print(" [{s}]", .{keyword});
-    if (context) |suffix| std.debug.print("{s}", .{suffix});
-    std.debug.print("\n", .{});
+    }) catch {};
+    if (keyword.len > 0) writer.print(" [{s}]", .{keyword}) catch {};
+    if (context) |suffix| writer.print("{s}", .{suffix}) catch {};
 }
 
 fn printJsonInvalid(
-    alloc: std.mem.Allocator,
     line_number: usize,
     input: record.Record,
     value_errors: []const schema_validate.Failure,
     key: ?PartResult,
-) !void {
-    var output = std.Io.Writer.Allocating.init(alloc);
-    try output.writer.print("{{\"command\":\"read\",\"kind\":\"invalid\",\"line\":{d}", .{line_number});
-    if (record.field(input.document.root, "topic")) |topic| if (topic.value == .string) {
-        try output.writer.writeAll(",\"topic\":");
-        try record.writeString(&output.writer, topic.value.string);
-    };
-    for ([_][]const u8{ "partition", "offset" }) |name| {
-        if (record.field(input.document.root, name)) |node| {
-            try output.writer.writeByte(',');
-            try record.writeString(&output.writer, name);
-            try output.writer.writeByte(':');
-            try output.writer.writeAll(record.raw(input.document, node));
-        }
-    }
-    try output.writer.writeAll(",\"output\":{\"valid\":false,\"errors\":[");
-    var first = true;
-    for (value_errors) |failure| {
-        try writeJsonFailure(&output.writer, &first, failure);
-    }
-    if (key) |part| for (part.errors) |failure| {
-        try writeJsonFailure(&output.writer, &first, failure);
-    };
-    try output.writer.writeAll("]}}\n");
-    std.debug.print("{s}", .{output.written()});
-}
-
-fn writeJsonFailure(writer: *std.Io.Writer, first: *bool, failure: schema_validate.Failure) !void {
-    if (!first.*) try writer.writeByte(',');
-    first.* = false;
-    try writer.writeAll("{\"keywordLocation\":");
-    try record.writeString(writer, displayPath(failure.keywordLocation));
-    try writer.writeAll(",\"instanceLocation\":");
-    try record.writeString(writer, displayPath(failure.instanceLocation));
-    try writer.writeAll(",\"error\":");
-    try record.writeString(writer, failure.@"error");
-    try writer.writeByte('}');
+) void {
+    const key_errors: []const schema_validate.Failure = if (key) |part| part.errors else &.{};
+    (app.Diagnostics{ .command = "read", .json = true }).invalid(line_number, input, &.{ value_errors, key_errors });
 }
 
 fn recordPosition(alloc: std.mem.Allocator, input: record.Record) []const u8 {
@@ -786,13 +761,7 @@ fn recordFatal(global: cli.Global, alloc: std.mem.Allocator, line_number: usize,
 }
 
 fn readNote(global: cli.Global, message: []const u8) void {
-    if (global.errors_json) {
-        var output = std.Io.Writer.Allocating.init(std.heap.page_allocator);
-        std.json.Stringify.value(message, .{}, &output.writer) catch {};
-        std.debug.print("{{\"command\":\"read\",\"kind\":\"note\",\"message\":{s}}}\n", .{output.written()});
-    } else {
-        std.debug.print("{s}\n", .{message});
-    }
+    app.Diagnostics.init("read", global).note(message);
 }
 
 fn stdoutClosed() bool {
