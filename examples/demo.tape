@@ -34,7 +34,7 @@ Enter
 Sleep 1s
 
 # 2. write: validate and add the schema-ID header, then produce with kite
-Type "jq -c '{value:.}' orders.jsonl | wing write orders | kite produce -q --json orders"
+Type "wing write orders < orders.jsonl | kite produce -q --json orders"
 Sleep 200ms
 Enter
 Sleep 1s

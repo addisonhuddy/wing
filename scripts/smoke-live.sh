@@ -51,6 +51,13 @@ printf '%s\n' '{"topic":"'"$ORDERS"'","value":"{\"id\":1,\"name\":\"one\"}","hea
     "$WING" read | "$WING" write 2>"$TMP/write-selection.log" | "$KITE" produce --json "$ORDERS"
 grep -Fq "wing write: using ${ORDERS}-value version 1" "$TMP/write-selection.log"
 
+echo "bare JSON values with a REF"
+printf '%s\n' '{"id":5,"name":"bare"}' '{"value":{"id":6}}' |
+    "$WING" write "$ORDERS:1" >"$TMP/bare.jsonl"
+jq -se '.[0].value == {"id":5,"name":"bare"} and .[1].value == {"id":6} and
+    (.[0].headers[0].key == "__value_schema_id")' "$TMP/bare.jsonl" >/dev/null
+"$KITE" produce --json "$ORDERS" <"$TMP/bare.jsonl"
+
 echo "key schema selection and keyed round-trip"
 printf '%s\n' "$KEY_SCHEMA" | "$WING" push "$ORDERS" --key
 printf '%s\n' '{"topic":"'"$ORDERS"'","key":"{\"id\":1}","value":"{\"id\":2}","headers":[]}' |
