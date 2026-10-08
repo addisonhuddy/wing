@@ -5,6 +5,7 @@ const registry_mod = @import("registry.zig");
 const term = @import("term.zig");
 const jv = @import("jv.zig");
 const header = @import("header.zig");
+const validation = @import("schema/validate.zig");
 
 pub fn stderr(comptime fmt: []const u8, args: anytype) void {
     std.debug.print("wing: " ++ fmt ++ "\n", args);
@@ -68,6 +69,14 @@ pub fn emitJsonLines(alloc: std.mem.Allocator, io: std.Io, values: anytype, json
         try out.writer.writeByte('\n');
     }
     writeStdout(io, out.written(), json_errors, command);
+}
+
+pub fn emitValidationFailureJson(failure: validation.Failure, first: *bool) void {
+    if (!first.*) std.debug.print(",", .{});
+    first.* = false;
+    var output = std.Io.Writer.Allocating.init(std.heap.page_allocator);
+    std.json.Stringify.value(failure, .{}, &output.writer) catch return;
+    std.debug.print("{s}", .{output.written()});
 }
 
 pub fn stringOf(value: std.json.Value) ?[]const u8 {

@@ -48,7 +48,11 @@ pub fn run(init: std.process.Init, global: cli.Global, args: []const []const u8)
     const raw_subject = parsed.subject;
     const subject = try subjectForTopic(init.arena.allocator(), raw_subject, key);
     const version = parsed.version;
-    const versions = reg.versions(subject) catch |err| {
+    const versions_request = if (permanent)
+        reg.versionsIncludingDeleted(subject)
+    else
+        reg.versions(subject);
+    const versions = versions_request catch |err| {
         if (reg.last_status == 404)
             fatal(noSchemaMessage(init.arena.allocator(), topicFromSubject(raw_subject), subject, global, settings), global.errors_json, "rm");
         commandError(&reg, err, global, "rm");
@@ -57,11 +61,22 @@ pub fn run(init: std.process.Init, global: cli.Global, args: []const []const u8)
         fatal(noSchemaMessage(init.arena.allocator(), topicFromSubject(raw_subject), subject, global, settings), global.errors_json, "rm");
     if (version) |v| if (!hasVersion(init.arena.allocator(), versions, v))
         fatal(unknownVersionMessage(init.arena.allocator(), subject, v, versions), global.errors_json, "rm");
+    var live_versions: ?std.json.Value = null;
+    if (permanent) {
+        live_versions = reg.versions(subject) catch |err| blk: {
+            if (reg.last_status == 404) break :blk null;
+            commandError(&reg, err, global, "rm");
+        };
+    }
     if (!yes) {
         if (versions == .array) {
             for (versions.array.items) |version_value| {
                 const version_text = try registry_mod.valueText(init.arena.allocator(), version_value);
-                const schema = reg.schema(subject, version_text) catch |err| commandError(&reg, err, global, "rm");
+                const schema_request = if (permanent)
+                    reg.schemaIncludingDeleted(subject, version_text)
+                else
+                    reg.schema(subject, version_text);
+                const schema = schema_request catch |err| commandError(&reg, err, global, "rm");
                 const id = registry_mod.valueText(init.arena.allocator(), jsonField(schema, "id") orelse .null) catch "?";
                 const guid = textField(schema, "guid") orelse "?";
                 std.debug.print("wing rm:   {s}:{s} id={s} guid={s}\n", .{ subject, version_text, id, guid });
@@ -77,7 +92,14 @@ pub fn run(init: std.process.Init, global: cli.Global, args: []const []const u8)
     }
     const suffix = if (version) |v| try std.fmt.allocPrint(init.arena.allocator(), "/versions/{s}", .{v}) else "";
     const path = try std.fmt.allocPrint(init.arena.allocator(), "/subjects/{s}{s}", .{ try registry_mod.pathEscape(init.arena.allocator(), subject), suffix });
-    _ = reg.delete(path) catch |err| commandError(&reg, err, global, "rm");
+    const live = live_versions orelse .null;
+    const target_is_live = if (!permanent)
+        true
+    else if (version) |v|
+        hasVersion(init.arena.allocator(), live, v)
+    else
+        live == .array and live.array.items.len > 0;
+    if (target_is_live) _ = reg.delete(path) catch |err| commandError(&reg, err, global, "rm");
     if (permanent) {
         const hard = try std.fmt.allocPrint(init.arena.allocator(), "{s}?permanent=true", .{path});
         _ = reg.delete(hard) catch |err| commandError(&reg, err, global, "rm");
