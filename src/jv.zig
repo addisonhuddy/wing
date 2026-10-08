@@ -69,6 +69,15 @@ const Parser = struct {
         p.pos += 1;
         const content_start = p.pos;
         var escaped = false;
+        const Block = @Vector(16, u8);
+        while (p.src.len - p.pos >= 16) {
+            const bytes: Block = p.src[p.pos..][0..16].*;
+            const special = (bytes == @as(Block, @splat('"'))) |
+                (bytes == @as(Block, @splat('\\'))) |
+                (bytes < @as(Block, @splat(0x20)));
+            if (@reduce(.Or, special)) break;
+            p.pos += 16;
+        }
         while (p.pos < p.src.len) {
             const c = p.src[p.pos];
             if (c == '"') {
@@ -351,6 +360,31 @@ test "JSON number source slice and escaped strings" {
     try std.testing.expectEqualStrings("1.00e+9", sourceSlice(doc, members[0].value));
     try std.testing.expectEqualStrings("line\nquote\"", members[1].value.value.string);
     try std.testing.expectEqualStrings(source, try stringify(arena.allocator(), doc.root));
+}
+
+test "JSON string fast scan stops at escapes and control characters" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var source: std.ArrayListUnmanaged(u8) = .empty;
+    try source.appendSlice(alloc, "{\"s\":\"");
+    try source.appendNTimes(alloc, 'a', 32);
+    try source.appendSlice(alloc, "\\n");
+    try source.appendNTimes(alloc, 'b', 48);
+    try source.appendSlice(alloc, "\"}");
+    const document = try parse(alloc, source.items);
+    const text = document.root.value.object[0].value.value.string;
+    try std.testing.expectEqual(@as(usize, 81), text.len);
+    try std.testing.expectEqual(@as(u8, '\n'), text[32]);
+    try std.testing.expectEqual(@as(u8, 'b'), text[33]);
+    try std.testing.expectEqual(@as(u8, 'b'), text[80]);
+
+    source.clearRetainingCapacity();
+    try source.appendSlice(alloc, "{\"s\":\"");
+    try source.appendNTimes(alloc, 'a', 32);
+    try source.append(alloc, 1);
+    try source.appendSlice(alloc, "\"}");
+    try std.testing.expectError(error.InvalidJson, parse(alloc, source.items));
 }
 
 test "escaped strings decode Unicode while raw high bytes remain unchanged" {
