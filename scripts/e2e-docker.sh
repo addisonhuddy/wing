@@ -140,26 +140,18 @@ PY
             || fail "raw header did not resolve"
         "$WING" write "$TOPIC:1" <"$TMP/$form.jsonl" >"$TMP/$form.out"
         python3 - "$GUID" "$TMP/$form.out" <<'PY'
+import base64
+import json
 import sys
 
 header = b"\x01" + bytes.fromhex(sys.argv[1].replace("-", ""))
-encoded = bytearray(b'"')
-for byte in header:
-    if byte == 34:
-        encoded.extend(b'\\"')
-    elif byte == 92:
-        encoded.extend(b"\\\\")
-    elif byte < 32:
-        encoded.extend(b"\\u%04x" % byte)
-    else:
-        encoded.append(byte)
-encoded.extend(b'"')
 output = open(sys.argv[2], "rb").read()
-needle = b'"key":"__value_schema_id","value":' + encoded
-if needle not in output:
-    raise SystemExit("schema header was not repaired to kite-compatible bytes")
-if not any(byte >= 128 for byte in header) or not any(byte >= 128 for byte in output):
-    raise SystemExit("test GUID did not exercise raw high bytes")
+record = json.loads(output)
+schema_header = next(item for item in record["headers"] if item["key"] == "__value_schema_id")
+if schema_header.get("value_b64") != base64.b64encode(header).decode():
+    raise SystemExit("schema header was not emitted as standard base64")
+if any(byte >= 128 for byte in output):
+    raise SystemExit("schema header output was not ASCII-safe")
 PY
     else
         set +e
@@ -167,10 +159,19 @@ PY
         escaped_status=$?
         set -e
         [ "$escaped_status" -eq 2 ] &&
-            grep -Fq 'corrupt __value_schema_id header' "$TMP/$form.err" \
+            grep -Fq 'corrupt __value_schema_id header' "$TMP/$form.err" &&
+            grep -Fq 'upgrade kite so it emits value_b64' "$TMP/$form.err" \
             || fail "escaped high-byte header was not rejected"
     fi
 done
+
+echo "== schema header survives jq between wing and kite =="
+printf '%s\n' '{"value":{"id":1},"headers":[]}' |
+    "$WING" write "$TOPIC" | "$KITE_BIN" produce --json "$TOPIC"
+"$KITE_BIN" consume --from-beginning --max 1 --idle 3s --json "$TOPIC" |
+    jq -c . | "$WING" read |
+    jq -s -e --arg guid "$GUID" 'length == 1 and .[0].schema.value.guid == $guid and .[0].value.id == 1' >/dev/null \
+    || fail "schema identity did not survive consume | jq | wing read"
 
 echo "== tombstones and empty values through kite =="
 EMPTY_TOPIC="wing-e2e-empty-$(date +%s)-$RANDOM"

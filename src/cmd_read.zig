@@ -296,9 +296,9 @@ pub fn run(init: std.process.Init, global: cli.Global, args: []const []const u8)
             recordFatal(global, alloc, line_number, "expected a JSON record; did you mean 'kite consume --json'?", .{});
         read_count += 1;
 
-        const value_bytes = try record.bytes(record_alloc, input_record.document, input_record.value);
+        const value_bytes = try input_record.payloadBytes(record_alloc, input_record.value);
         const value_result = if (value_bytes.len == 0)
-            PartResult{ .node = input_record.value, .payload = value_bytes, .source_was_string = input_record.value.value == .string, .empty = true }
+            PartResult{ .node = input_record.value, .payload = value_bytes, .source_was_string = input_record.value.value == .string and input_record.value_b64_bytes == null, .empty = true }
         else
             try processPart(&resolver, record_alloc, input_record, input_record.value, "__value_schema_id", false, line_number);
 
@@ -336,7 +336,9 @@ pub fn run(init: std.process.Init, global: cli.Global, args: []const []const u8)
 
         if (check) {
             if (record_failed) try writeOutputLine(&output, record_alloc, line, false);
-        } else if (value_result.empty and key_result == null) {
+        } else if (value_result.empty and key_result == null and
+            input_record.value_b64_bytes == null and input_record.key_b64_bytes == null)
+        {
             try writeOutputLine(&output, record_alloc, line, color);
         } else {
             try writeOutputLine(&output, record_alloc, try renderRecord(record_alloc, input_record, value_result, key_result), color);
@@ -372,11 +374,13 @@ fn processPart(
     key: bool,
     line_number: usize,
 ) !PartResult {
-    const payload_all = try record.bytes(alloc, input.document, node);
+    const payload_all = try input.payloadBytes(alloc, node);
     var result: PartResult = .{
         .node = node,
         .payload = payload_all,
-        .source_was_string = node.value == .string,
+        .source_was_string = node.value == .string and
+            !(node == input.value and input.value_b64_bytes != null) and
+            !(if (input.key) |key_node| node == key_node and input.key_b64_bytes != null else false),
     };
     if (payload_all.len == 0) {
         result.empty = true;
@@ -393,7 +397,7 @@ fn processPart(
         } else if (bytes.len == 5 and bytes[0] == 0) {
             result.prefix = .{ .id = std.mem.readInt(u32, bytes[1..5], .big) };
         } else {
-            result.errors = try singleFailure(alloc, try std.fmt.allocPrint(alloc, "corrupt {s} header ({d} bytes; was the line re-encoded by jq?)", .{ header_name, bytes.len }));
+            result.errors = try singleFailure(alloc, try std.fmt.allocPrint(alloc, "corrupt {s} header ({d} bytes; was the line re-encoded by jq?; upgrade kite so it emits value_b64)", .{ header_name, bytes.len }));
             return result;
         }
         if (header.detectPrefix(payload_all) != null) {
@@ -464,18 +468,34 @@ fn renderRecord(
     for (input.members) |member| {
         const name = member.key;
         if (std.mem.eql(u8, name, "schema")) continue;
+        if (std.mem.eql(u8, name, "value_b64")) continue;
         if (std.mem.eql(u8, name, "value")) {
             if (member.value != input.value or wrote_value) continue;
-            try writeFieldPrefix(&output.writer, alloc, &first, name);
-            try writePartValue(&output.writer, input.document, value);
+            try writePartValue(&output.writer, alloc, &first, input.document, value, "value", "value_b64");
             wrote_value = true;
         } else if (std.mem.eql(u8, name, "key")) {
             if (input.key == null or member.value != input.key.? or wrote_key) continue;
-            try writeFieldPrefix(&output.writer, alloc, &first, name);
             if (key) |part| {
-                try writePartValue(&output.writer, input.document, part);
-            } else {
+                try writePartValue(&output.writer, alloc, &first, input.document, part, "key", "key_b64");
+            } else if (member.value.value == .null_value) {
+                try writeFieldPrefix(&output.writer, alloc, &first, "key");
                 try output.writer.writeAll(record.raw(input.document, member.value));
+            } else {
+                try record.writeBytesField(
+                    &output.writer,
+                    &first,
+                    "key",
+                    "key_b64",
+                    try input.payloadBytes(alloc, member.value),
+                );
+            }
+            wrote_key = true;
+        } else if (std.mem.eql(u8, name, "key_b64")) {
+            if (input.key == null or member.value != input.key.? or wrote_key) continue;
+            if (key) |part| {
+                try writePartValue(&output.writer, alloc, &first, input.document, part, "key", "key_b64");
+            } else {
+                try record.writeBytesField(&output.writer, &first, "key", "key_b64", input.key_b64_bytes.?);
             }
             wrote_key = true;
         } else if (std.mem.eql(u8, name, "headers")) {
@@ -489,8 +509,7 @@ fn renderRecord(
         }
     }
     if (!wrote_value) {
-        try writeFieldPrefix(&output.writer, alloc, &first, "value");
-        try writePartValue(&output.writer, input.document, value);
+        try writePartValue(&output.writer, alloc, &first, input.document, value, "value", "value_b64");
     }
     if (input.headers_node != null and !wrote_headers) {
         try writeFieldPrefix(&output.writer, alloc, &first, "headers");
@@ -502,13 +521,25 @@ fn renderRecord(
     return output.written();
 }
 
-fn writePartValue(writer: *std.Io.Writer, document: jv.Document, part: PartResult) !void {
+fn writePartValue(
+    writer: *std.Io.Writer,
+    alloc: std.mem.Allocator,
+    first: *bool,
+    document: jv.Document,
+    part: PartResult,
+    plain_name: []const u8,
+    b64_name: []const u8,
+) !void {
     if (part.inline_value) {
+        try writeFieldPrefix(writer, alloc, first, plain_name);
         try writer.writeAll(part.payload);
-    } else if (part.source_was_string and !part.stripped_prefix and part.node != null) {
+    } else if (part.source_was_string and !part.stripped_prefix and part.node != null and
+        std.unicode.utf8ValidateSlice(part.payload))
+    {
+        try writeFieldPrefix(writer, alloc, first, plain_name);
         try writer.writeAll(record.raw(document, part.node.?));
     } else {
-        try record.writeString(writer, part.payload);
+        try record.writeBytesField(writer, first, plain_name, b64_name, part.payload);
     }
 }
 
@@ -524,8 +555,12 @@ fn writeFilteredHeaders(writer: *std.Io.Writer, input: record.Record) !void {
         } else {
             try writer.writeAll("{\"key\":");
             try record.writeString(writer, item.key);
-            try writer.writeAll(",\"value\":");
-            if (item.value) |bytes| try record.writeString(writer, bytes) else try writer.writeAll("null");
+            if (item.value) |bytes| {
+                var header_first = false;
+                try record.writeBytesField(writer, &header_first, "value", "value_b64", bytes);
+            } else {
+                try writer.writeAll(",\"value\":null");
+            }
             try writer.writeByte('}');
         }
     }

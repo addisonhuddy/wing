@@ -252,6 +252,8 @@ run_read_input_case push-compat-check-rejected 1 empty "wing push: --compat cann
     '{"type":"object"}' push --check --compat BACKWARD
 run_read_input_case write-empty-value 0 nonempty "1 written" \
     '{"value":"","headers":[{"key":"__value_schema_id","value":"stale"}]}' write
+run_read_input_case write-value-b64-rejected 1 empty "value_b64 is not supported by wing write" \
+    '{"value_b64":"e30="}' write
 run_read_input_case write-empty-value-byte-preserved 0 identical "1 written" \
     '{"value":"","headers":[{"key":"x-trace","value":"stable"}]}' write
 run_case missing-registry-json 1 empty '"kind":"error","command":"ls"' --errors=json ls
@@ -342,6 +344,30 @@ mkdir -p "$TMP/cache-work"
 run_read_input_case read-offline-cache-guid 0 nonempty "1 read, 1 passed, 0 failed" \
     '{"topic":"offline","value":"{}","headers":[{"key":"__value_schema_id","value":"\u0001\u0011\u0011\u0011\u0011\u0011\u0011\u0011\u0011\u0011\u0011\u0011\u0011\u0011\u0011\u0011\u0011"}]}' \
     --workdir "$TMP/cache-work" --schema-dir "$TMP/schema-cache" read
+run_read_input_case read-offline-cache-guid-base64 0 nonempty "1 read, 1 passed, 0 failed" \
+    '{"topic":"offline","value_b64":"e30=","headers":[{"key":"__value_schema_id","value_b64":"ARERERERERERERERERERERE="}]}' \
+    --workdir "$TMP/cache-work" --schema-dir "$TMP/schema-cache" read
+grep -Fq '"value":{}' "$TMP/read-offline-cache-guid-base64.out" &&
+    ! grep -Fq 'value_b64' "$TMP/read-offline-cache-guid-base64.out" || {
+    echo "FAIL read-offline-cache-guid-base64: decoded record was not rendered without base64 fields"
+    cat "$TMP/read-offline-cache-guid-base64.out"
+    exit 1
+}
+run_read_input_case read-key-b64-binary 2 nonempty "no __value_schema_id header or schema-id prefix" \
+    '{"key_b64":"gP8=","value":"{}"}' read
+grep -Fq '"key_b64":"gP8="' "$TMP/read-key-b64-binary.out" || {
+    echo "FAIL read-key-b64-binary: binary key was dropped or changed"
+    cat "$TMP/read-key-b64-binary.out"
+    exit 1
+}
+run_read_input_case read-key-b64-utf8 2 nonempty "no __value_schema_id header or schema-id prefix" \
+    '{"key_b64":"aGk=","value":"{}"}' read
+grep -Fq '"key":"hi"' "$TMP/read-key-b64-utf8.out" &&
+    ! grep -Fq 'key_b64' "$TMP/read-key-b64-utf8.out" || {
+    echo "FAIL read-key-b64-utf8: UTF-8 key was not rendered as a plain string"
+    cat "$TMP/read-key-b64-utf8.out"
+    exit 1
+}
 grep -Fq '"topic":"offline"' "$TMP/read-offline-cache-guid.out" || {
     echo "FAIL read-offline-cache-guid: schema metadata missing"
     cat "$TMP/read-offline-cache-guid.out"
@@ -368,6 +394,7 @@ run_read_input_case write-offline-cache-guid 0 nonempty "1 written" \
     '{"value":"{}","headers":[{"key":"custom","value":"one"},{"key":"__value_schema_id","value":"stale"}],"schema":{"value":{"guid":"11111111-1111-1111-1111-111111111111"}}}' \
     --workdir "$TMP/cache-work" --schema-dir "$TMP/schema-cache" write
 grep -Fq '"key":"__value_schema_id"' "$TMP/write-offline-cache-guid.out" &&
+    grep -Fq '"value_b64":"ARERERERERERERERERERERE="' "$TMP/write-offline-cache-guid.out" &&
     grep -Fq '"key":"custom","value":"one"' "$TMP/write-offline-cache-guid.out" &&
     ! grep -Fq '"schema":' "$TMP/write-offline-cache-guid.out" || {
     echo "FAIL write-offline-cache-guid: schema header or envelope transformation is wrong"
@@ -487,7 +514,7 @@ cmp -s "$TMP/tty-write.stripped" "$TMP/tty-write.pipe" &&
 }
 python3 - "$TMP/tty-write.pipe" <<'PY'
 import sys
-assert any(byte >= 0x80 for byte in open(sys.argv[1], "rb").read())
+assert not any(byte >= 0x80 for byte in open(sys.argv[1], "rb").read())
 PY
 echo "PASS tty JSON coloring preserves pipe bytes"
 
