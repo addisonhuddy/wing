@@ -6,6 +6,50 @@ const jv = @import("jv.zig");
 const schema_compile = @import("schema/compile.zig");
 const schema_cache = @import("schema_cache.zig");
 
+const SubjectVersion = struct {
+    subject: []const u8,
+    version: []const u8,
+};
+
+fn defaultContext(entry: std.json.Value) bool {
+    if (objectValue(entry, "context")) |context| {
+        if (stringValue(context)) |name| return std.mem.eql(u8, name, ".");
+    }
+    return true;
+}
+
+fn subjectMatchesRole(subject: []const u8, key: bool) bool {
+    const suffix = if (key) "-key" else "-value";
+    return std.mem.endsWith(u8, subject, suffix) and std.mem.indexOfScalar(u8, subject, ':') == null;
+}
+
+fn subjectMatchesTopic(subject: []const u8, topic: []const u8, key: bool) bool {
+    const suffix = if (key) "-key" else "-value";
+    return subject.len == topic.len + suffix.len and
+        std.mem.eql(u8, subject[0..topic.len], topic) and
+        std.mem.eql(u8, subject[topic.len..], suffix);
+}
+
+fn locationVersionNumber(version: []const u8) u64 {
+    return std.fmt.parseInt(u64, version, 10) catch std.math.maxInt(u64);
+}
+
+fn selectSubjectVersion(
+    current: ?SubjectVersion,
+    candidate: SubjectVersion,
+    key: bool,
+    topic: ?[]const u8,
+) ?SubjectVersion {
+    if (!subjectMatchesRole(candidate.subject, key)) return current;
+    const selected = current orelse return candidate;
+    const candidate_matches = if (topic) |name| subjectMatchesTopic(candidate.subject, name, key) else false;
+    const selected_matches = if (topic) |name| subjectMatchesTopic(selected.subject, name, key) else false;
+    if (candidate_matches != selected_matches) return if (candidate_matches) candidate else selected;
+    if (!candidate_matches and !std.mem.eql(u8, candidate.subject, selected.subject))
+        return if (std.mem.lessThan(u8, candidate.subject, selected.subject)) candidate else selected;
+    return if (locationVersionNumber(candidate.version) < locationVersionNumber(selected.version)) candidate else selected;
+}
+
 pub const Registry = struct {
     alloc: std.mem.Allocator,
     client: http.Client,
@@ -122,31 +166,22 @@ pub const Registry = struct {
         return std.json.parseFromSliceLeaky(std.json.Value, self.alloc, body, .{ .allocate = .alloc_always, .parse_numbers = false });
     }
 
-    pub fn idLocation(self: *Registry, id: u32, key: bool) !struct { subject: ?[]const u8, version: ?[]const u8 } {
+    pub fn idLocation(self: *Registry, id: u32, key: bool, topic: ?[]const u8) !struct { subject: ?[]const u8, version: ?[]const u8 } {
         const path = try std.fmt.allocPrint(self.alloc, "/schemas/ids/{d}/versions", .{id});
         const body = try self.get(path);
         const locations = try std.json.parseFromSliceLeaky(std.json.Value, self.alloc, body, .{ .allocate = .alloc_always, .parse_numbers = false });
         if (locations != .array) return .{ .subject = null, .version = null };
-        var best_subject: ?[]const u8 = null;
-        var best_version: ?[]const u8 = null;
+        var best: ?SubjectVersion = null;
         for (locations.array.items) |entry| {
-            if (objectValue(entry, "context")) |context| {
-                if (stringValue(context)) |name| if (!std.mem.eql(u8, name, ".")) continue;
-            }
+            if (!defaultContext(entry)) continue;
             const subject = stringValue(objectValue(entry, "subject") orelse continue) orelse continue;
-            const suffix = if (key) "-key" else "-value";
-            if (!std.mem.endsWith(u8, subject, suffix) or std.mem.indexOfScalar(u8, subject, ':') != null) continue;
             const version = if (objectValue(entry, "version")) |value| try valueText(self.alloc, value) else continue;
-            const earlier_subject = best_subject == null or std.mem.lessThan(u8, subject, best_subject.?);
-            const earlier_version = best_subject != null and std.mem.eql(u8, subject, best_subject.?) and
-                (std.fmt.parseInt(u64, version, 10) catch std.math.maxInt(u64)) <
-                    (std.fmt.parseInt(u64, best_version.?, 10) catch std.math.maxInt(u64));
-            if (earlier_subject or earlier_version) {
-                best_subject = subject;
-                best_version = version;
-            }
+            best = selectSubjectVersion(best, .{ .subject = subject, .version = version }, key, topic);
         }
-        return .{ .subject = best_subject, .version = best_version };
+        return .{
+            .subject = if (best) |location| location.subject else null,
+            .version = if (best) |location| location.version else null,
+        };
     }
 
     pub fn idAnyLocation(self: *Registry, id: u32) !struct { subject: ?[]const u8, version: ?[]const u8 } {
@@ -233,37 +268,29 @@ pub const Registry = struct {
         }
     }
 
-    pub fn guidLocation(self: *Registry, guid_text: []const u8, key: bool) !struct { subject: ?[]const u8, version: ?[]const u8 } {
+    pub fn guidLocation(self: *Registry, guid_text: []const u8, key: bool, topic: ?[]const u8) !struct { subject: ?[]const u8, version: ?[]const u8 } {
         const ids_body = try self.get(try std.fmt.allocPrint(self.alloc, "/schemas/guids/{s}/ids", .{guid_text}));
         const ids = try std.json.parseFromSliceLeaky(std.json.Value, self.alloc, ids_body, .{ .allocate = .alloc_always, .parse_numbers = false });
         if (ids != .array or ids.array.items.len == 0) return .{ .subject = null, .version = null };
-        var best_subject: ?[]const u8 = null;
-        var best_version: ?[]const u8 = null;
+        var best: ?SubjectVersion = null;
         for (ids.array.items) |id_value| {
             const id = try guidSchemaId(self.alloc, id_value) orelse continue;
             const versions_body = try self.get(try std.fmt.allocPrint(self.alloc, "/schemas/ids/{s}/versions", .{id}));
             const locations = try std.json.parseFromSliceLeaky(std.json.Value, self.alloc, versions_body, .{ .allocate = .alloc_always, .parse_numbers = false });
             if (locations != .array) continue;
             for (locations.array.items) |entry| {
+                if (!defaultContext(entry)) continue;
                 const subject_value = objectValue(entry, "subject") orelse continue;
                 const subject = stringValue(subject_value) orelse continue;
-                const suffix = if (key) "-key" else "-value";
-                if (!std.mem.endsWith(u8, subject, suffix) or std.mem.indexOfScalar(u8, subject, ':') != null) continue;
                 const version = if (objectValue(entry, "version")) |v| try valueText(self.alloc, v) else null;
-                const is_first_subject = best_subject == null or std.mem.lessThan(u8, subject, best_subject.?);
-                const is_earlier_version = if (version) |candidate|
-                    best_subject != null and std.mem.eql(u8, subject, best_subject.?) and best_version != null and
-                        (std.fmt.parseInt(u64, candidate, 10) catch std.math.maxInt(u64)) <
-                            (std.fmt.parseInt(u64, best_version.?, 10) catch std.math.maxInt(u64))
-                else
-                    false;
-                if (is_first_subject or is_earlier_version) {
-                    best_subject = subject;
-                    best_version = version;
-                }
+                if (version) |candidate|
+                    best = selectSubjectVersion(best, .{ .subject = subject, .version = candidate }, key, topic);
             }
         }
-        return .{ .subject = best_subject, .version = best_version };
+        return .{
+            .subject = if (best) |location| location.subject else null,
+            .version = if (best) |location| location.version else null,
+        };
     }
 
     pub fn compat(self: *Registry, subject: []const u8) ![]const u8 {
@@ -317,6 +344,31 @@ fn oneLine(alloc: std.mem.Allocator, text: []const u8) ![]const u8 {
 
 test "registry error messages are single-line" {
     try std.testing.expectEqualStrings("first second third", try oneLine(std.testing.allocator, "first\r\nsecond\tthird"));
+}
+
+test "schema location selection prefers the record topic before alphabetical fallback" {
+    const locations = [_]SubjectVersion{
+        .{ .subject = "legacy-value", .version = "2" },
+        .{ .subject = "orders-value", .version = "2" },
+        .{ .subject = "orders-value", .version = "1" },
+        .{ .subject = "orders-key", .version = "4" },
+    };
+
+    var selected: ?SubjectVersion = null;
+    for (locations) |location|
+        selected = selectSubjectVersion(selected, location, false, "orders");
+    try std.testing.expectEqualStrings("orders-value", selected.?.subject);
+    try std.testing.expectEqualStrings("1", selected.?.version);
+
+    selected = null;
+    for (locations) |location|
+        selected = selectSubjectVersion(selected, location, false, "missing");
+    try std.testing.expectEqualStrings("legacy-value", selected.?.subject);
+
+    selected = null;
+    for (locations) |location|
+        selected = selectSubjectVersion(selected, location, true, "orders");
+    try std.testing.expectEqualStrings("orders-key", selected.?.subject);
 }
 
 test "GUID schema ID responses select only default-context entries" {

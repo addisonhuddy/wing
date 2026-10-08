@@ -42,7 +42,7 @@ const Resolver = struct {
     lookups: std.StringHashMapUnmanaged(?*Info) = .empty,
 
     fn resolve(self: *Resolver, reference: []const u8, key: bool, line: usize) !*Info {
-        if (app.headerParseableGuid(reference)) return self.resolveGuid(reference, key, line);
+        if (app.headerParseableGuid(reference)) return self.resolveGuid(reference, key, null, line);
         const at = std.mem.lastIndexOfScalar(u8, reference, '@');
         const topic = if (at) |index| reference[0..index] else reference;
         const version_request = if (at) |index| reference[index + 1 ..] else "latest";
@@ -114,8 +114,12 @@ const Resolver = struct {
         return info;
     }
 
-    fn resolveGuid(self: *Resolver, guid: []const u8, key: bool, line: usize) !*Info {
-        const cache_key = try std.fmt.allocPrint(self.alloc, "guid:{s}", .{guid});
+    fn resolveGuid(self: *Resolver, guid: []const u8, key: bool, requested_topic: ?[]const u8, line: usize) !*Info {
+        const role = if (key) "key" else "value";
+        const topic_name = requested_topic orelse "";
+        const cache_key = try std.fmt.allocPrint(self.alloc, "guid:{s}:{s}:{d}:{s}", .{
+            guid, role, topic_name.len, topic_name,
+        });
         if (self.schemas.get(cache_key)) |found| return found;
         var value: std.json.Value = undefined;
         var subject: ?[]const u8 = null;
@@ -144,7 +148,7 @@ const Resolver = struct {
                     fatalFmt(self, "schema GUID '{s}' not found in {s}", .{ guid, app.registryDescription(self.alloc, self.global, self.settings) });
                 fatalLine(self.global, line, self.registry.last_error orelse @errorName(err));
             };
-            const location = self.registry.guidLocation(guid, key) catch |err| {
+            const location = self.registry.guidLocation(guid, key, requested_topic) catch |err| {
                 if (self.registry.last_status == 404)
                     fatalFmt(self, "schema GUID '{s}' not found in {s}", .{ guid, app.registryDescription(self.alloc, self.global, self.settings) });
                 fatalLine(self.global, line, self.registry.last_error orelse @errorName(err));
@@ -152,13 +156,24 @@ const Resolver = struct {
             subject = location.subject;
             version = location.version;
         }
+        if (cached and self.settings.urls.len > 0) {
+            const location = self.registry.guidLocation(guid, key, requested_topic) catch |err| {
+                if (self.registry.last_status == 404)
+                    fatalFmt(self, "schema GUID '{s}' not found in {s}", .{ guid, app.registryDescription(self.alloc, self.global, self.settings) });
+                fatalLine(self.global, line, self.registry.last_error orelse @errorName(err));
+            };
+            if (location.subject) |selected_subject| subject = selected_subject;
+            if (location.version) |selected_version| version = selected_version;
+        }
         const resolved_subject = subject orelse fatalFmt(self, "schema GUID '{s}' has no registered topic subject", .{guid});
         const resolved_version = version orelse "latest";
         const topic = if (std.mem.endsWith(u8, resolved_subject, "-value") or std.mem.endsWith(u8, resolved_subject, "-key"))
             app.topicFromSubject(resolved_subject)
         else
             null;
-        return self.makeInfo(value, resolved_subject, topic, resolved_version, cached, line);
+        const info = try self.makeInfo(value, resolved_subject, topic, resolved_version, cached, line);
+        try self.schemas.put(self.alloc, cache_key, info);
+        return info;
     }
 
     fn makeInfo(
@@ -196,7 +211,6 @@ const Resolver = struct {
         const info = try self.alloc.create(Info);
         info.* = .{ .value = value, .guid = guid, .subject = subject, .topic = topic, .version = version, .plan = plan_ptr };
         try self.schemas.put(self.alloc, try std.fmt.allocPrint(self.alloc, "{s}@{s}", .{ subject, version }), info);
-        try self.schemas.put(self.alloc, try std.fmt.allocPrint(self.alloc, "guid:{s}", .{guid}), info);
         if (!cached and self.settings.schema_dir != null) self.cacheInfo(info) catch |err|
             if (!self.global.quiet) writeNote(self.global, app.allocPrint(
                 self.alloc,
@@ -318,7 +332,12 @@ pub fn run(init: std.process.Init, global: cli.Global, args: []const []const u8)
                 if (record.field(schema_node, "value")) |value_schema| {
                     if (record.field(value_schema, "guid")) |guid_node| {
                         if (guid_node.value == .string)
-                            selection_info = try resolver.resolveGuid(guid_node.value.string, false, line_number);
+                            selection_info = try resolver.resolveGuid(
+                                guid_node.value.string,
+                                false,
+                                recordTopic(input_record, value_schema),
+                                line_number,
+                            );
                     }
                 }
             }
@@ -328,7 +347,12 @@ pub fn run(init: std.process.Init, global: cli.Global, args: []const []const u8)
                 if (record.field(schema_node, "key")) |key_schema| {
                     if (record.field(key_schema, "guid")) |guid_node| {
                         if (guid_node.value == .string)
-                            key_info = try resolver.resolveGuid(guid_node.value.string, true, line_number);
+                            key_info = try resolver.resolveGuid(
+                                guid_node.value.string,
+                                true,
+                                recordTopic(input_record, key_schema),
+                                line_number,
+                            );
                     }
                 }
             }
@@ -404,7 +428,16 @@ fn selectValue(resolver: *Resolver, reference: ?[]const u8, input: record.Record
     const guid = record.field(value_schema, "guid") orelse
         fatalLine(resolver.global, line, "missing schema.value.guid; pass a REF");
     if (guid.value != .string) fatalLine(resolver.global, line, "schema.value.guid must be a string");
-    return resolver.resolveGuid(guid.value.string, false, line);
+    return resolver.resolveGuid(guid.value.string, false, recordTopic(input, value_schema), line);
+}
+
+fn recordTopic(input: record.Record, schema: *const jv.Node) ?[]const u8 {
+    return stringField(input.document.root, "topic") orelse stringField(schema, "topic");
+}
+
+fn stringField(node: *const jv.Node, name: []const u8) ?[]const u8 {
+    const field = record.field(node, name) orelse return null;
+    return if (field.value == .string) field.value.string else null;
 }
 
 fn preparePart(alloc: std.mem.Allocator, info: *Info, payload: []const u8, fit_enabled: bool) !Part {

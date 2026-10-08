@@ -23,6 +23,7 @@ curl -fsS "$SR/subjects" >/dev/null
 
 PREFIX="wing-live-$(date +%s)"
 ORDERS="$PREFIX-orders"
+LEGACY="$PREFIX-legacy"
 FIT="$PREFIX-fit"
 JAVA_HEADER="$PREFIX-java-header"
 JAVA_PREFIX="$PREFIX-java-prefix"
@@ -41,10 +42,14 @@ printf '%s\n' "$KEY_SCHEMA" >"$TMP/key.schema.json"
 
 echo "push and kite produce/read round-trip"
 GUID=$(printf '%s\n' "$SCHEMA" | "$WING" push "$ORDERS")
+printf '%s\n' "$SCHEMA" | "$WING" push "$LEGACY" >/dev/null
 printf '%s\n' '{"topic":"'"$ORDERS"'","value":"{\"id\":1,\"name\":\"one\"}","headers":[]}' |
     "$WING" write "$ORDERS" | "$KITE" produce --json "$ORDERS"
 "$KITE" consume --from-beginning --max 1 --idle 2s --json "$ORDERS" |
-    "$WING" read | jq -e '.value.id == 1' >/dev/null
+    "$WING" read | jq -e --arg topic "$ORDERS" '.value.id == 1 and .schema.value.topic == $topic and .schema.value.version == 1' >/dev/null
+"$KITE" consume --from-beginning --max 1 --idle 2s --json "$ORDERS" |
+    "$WING" read | "$WING" write 2>"$TMP/write-selection.log" | "$KITE" produce --json "$ORDERS"
+grep -Fq "wing write: using ${ORDERS}-value version 1" "$TMP/write-selection.log"
 
 echo "key schema selection and keyed round-trip"
 printf '%s\n' "$KEY_SCHEMA" | "$WING" push "$ORDERS" --key

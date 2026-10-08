@@ -34,8 +34,8 @@ const Resolver = struct {
     schemas: std.StringHashMapUnmanaged(*SchemaInfo) = .empty,
     warned_rules: std.StringHashMapUnmanaged(void) = .empty,
 
-    fn resolve(self: *Resolver, prefix: header.Prefix, key: bool, line_number: usize) !*SchemaInfo {
-        const schema_key = try self.prefixKey(prefix);
+    fn resolve(self: *Resolver, prefix: header.Prefix, key: bool, topic: ?[]const u8, line_number: usize) !*SchemaInfo {
+        const schema_key = try self.prefixKey(prefix, key, topic);
         if (self.schemas.get(schema_key)) |found| return found;
 
         var schema_value: std.json.Value = undefined;
@@ -56,8 +56,8 @@ const Resolver = struct {
                         was_cached = true;
                         subject = registry_mod.stringValue(registry_mod.objectValue(value, "subject") orelse .null);
                         if (subject == null) {
-                            if (registry_mod.stringValue(registry_mod.objectValue(value, "topic") orelse .null)) |topic|
-                                subject = try app.subjectForTopic(self.alloc, topic, key);
+                            if (registry_mod.stringValue(registry_mod.objectValue(value, "topic") orelse .null)) |cached_topic|
+                                subject = try app.subjectForTopic(self.alloc, cached_topic, key);
                         }
                         if (registry_mod.objectValue(value, "version")) |version_value|
                             version = try registry_mod.valueText(self.alloc, version_value);
@@ -74,7 +74,9 @@ const Resolver = struct {
                             });
                         recordFatal(self.global, self.alloc, line_number, "{s}", .{self.registry.last_error orelse @errorName(err)});
                     };
-                    const location = self.registry.guidLocation(text, key) catch |err| {
+                }
+                if (self.settings.urls.len > 0) {
+                    const location = self.registry.guidLocation(text, key, topic) catch |err| {
                         if (self.registry.last_status == 404)
                             recordFatal(self.global, self.alloc, line_number, "schema GUID {s} not found in {s}", .{
                                 text,
@@ -109,7 +111,7 @@ const Resolver = struct {
                     recordFatal(self.global, self.alloc, line_number, "{s}", .{self.registry.last_error orelse @errorName(err)});
                 };
                 guid = registry_mod.stringValue(registry_mod.objectValue(schema_value, "guid") orelse .null);
-                const location = self.registry.idLocation(id, key) catch |err|
+                const location = self.registry.idLocation(id, key, topic) catch |err|
                     recordFatal(self.global, self.alloc, line_number, "{s}", .{self.registry.last_error orelse @errorName(err)});
                 subject = location.subject;
                 version = location.version;
@@ -167,7 +169,6 @@ const Resolver = struct {
         };
         try self.schemas.put(self.alloc, schema_key, info);
         if (guid) |guid_text| {
-            try self.schemas.put(self.alloc, try self.guidKey(guid_text), info);
             if (!was_cached and self.settings.schema_dir != null)
                 self.writeCache(info) catch |err| {
                     if (!self.global.quiet) readNote(self.global, std.fmt.allocPrint(
@@ -180,18 +181,20 @@ const Resolver = struct {
         return info;
     }
 
-    fn prefixKey(self: *Resolver, prefix: header.Prefix) ![]const u8 {
+    fn prefixKey(self: *Resolver, prefix: header.Prefix, key: bool, topic: ?[]const u8) ![]const u8 {
+        const role = if (key) "key" else "value";
+        const topic_name = topic orelse "";
         return switch (prefix) {
             .guid => |bytes| blk: {
                 var formatted: [36]u8 = undefined;
-                break :blk try self.guidKey(header.formatGuid(bytes, &formatted));
+                break :blk try std.fmt.allocPrint(self.alloc, "guid:{s}:{s}:{d}:{s}", .{
+                    header.formatGuid(bytes, &formatted), role, topic_name.len, topic_name,
+                });
             },
-            .id => |id| try std.fmt.allocPrint(self.alloc, "id:{d}", .{id}),
+            .id => |id| try std.fmt.allocPrint(self.alloc, "id:{d}:{s}:{d}:{s}", .{
+                id, role, topic_name.len, topic_name,
+            }),
         };
-    }
-
-    fn guidKey(self: *Resolver, guid: []const u8) ![]const u8 {
-        return std.fmt.allocPrint(self.alloc, "guid:{s}", .{guid});
     }
 
     fn writeCache(self: *Resolver, info: *const SchemaInfo) !void {
@@ -409,7 +412,11 @@ fn processPart(
     }
 
     const prefix = result.prefix orelse return result;
-    result.info = try resolver.resolve(prefix, key, line_number);
+    const topic = if (record.field(input.document.root, "topic")) |topic_node|
+        if (topic_node.value == .string) topic_node.value.string else null
+    else
+        null;
+    result.info = try resolver.resolve(prefix, key, topic, line_number);
     const instance = jv.parse(alloc, result.payload) catch {
         result.errors = try singleFailure(alloc, "invalid JSON instance");
         return result;

@@ -75,7 +75,7 @@ pub fn run(init: std.process.Init, global: cli.Global, args: []const []const u8)
                 fatal(try std.fmt.allocPrint(alloc, "schema GUID '{s}' not found in {s}", .{ reference, registryDescription(alloc, global, settings) }), global.errors_json, "get");
             commandError(&reg, err, global, "get");
         };
-        const loc = reg.guidLocation(reference, key) catch |err| {
+        const loc = reg.guidLocation(reference, key, null) catch |err| {
             if (reg.last_status == 404)
                 fatal(try std.fmt.allocPrint(alloc, "schema GUID '{s}' not found in {s}", .{ reference, registryDescription(alloc, global, settings) }), global.errors_json, "get");
             commandError(&reg, err, global, "get");
