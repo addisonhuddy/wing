@@ -28,7 +28,8 @@ with kite, a Kafka CLI, using one JSON record per line.
 - Registry responses time out after 10 seconds by default; configure
   `schema.registry.request.timeout.ms` or
   `SCHEMA_REGISTRY_REQUEST_TIMEOUT_MS` to change the timeout in milliseconds.
-- `--errors=json` writes structured diagnostic lines to stderr; `-q` suppresses
+- `--errors=json` requests structured diagnostic lines on stderr; some `push`
+  schema lint/meta-schema findings currently remain plain text. `-q` suppresses
   summaries; `-v` adds provenance and fitting changes.
 - Per-record diagnostics, notes, and summaries are prefixed `wing read:` or
   `wing write:`. Missing write schema uses:
