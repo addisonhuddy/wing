@@ -1,0 +1,39 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.16.0
+      - run: zig build test
+      - name: Build release binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          for target in x86_64-linux aarch64-linux x86_64-macos aarch64-macos; do
+            zig build -Dtarget="$target" -p "dist/$target"
+            case "$target" in
+              x86_64-linux) asset=wing-linux-x86_64 ;;
+              aarch64-linux) asset=wing-linux-aarch64 ;;
+              x86_64-macos) asset=wing-macos-x86_64 ;;
+              aarch64-macos) asset=wing-macos-aarch64 ;;
+            esac
+            cp "dist/$target/bin/wing" "release/$asset"
+          done
+      - run: scripts/check-size.sh release/wing-linux-x86_64
+      - run: sha256sum release/* > release/SHA256SUMS
+      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          files: release/*
+          generate_release_notes: true

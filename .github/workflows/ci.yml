@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.16.0
+      - run: zig fmt --check src build.zig
+      - run: zig build
+      - run: zig build test
+      - run: scripts/cli-check.sh
+      - run: sudo apt-get update && sudo apt-get install -y zsh fish
+      - run: scripts/completion-check.sh
+      - run: scripts/jsts.sh
+      - run: scripts/check-size.sh
+
+  e2e:
+    runs-on: ubuntu-latest
+    needs: test
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.16.0
+      - run: zig build
+      - run: sudo apt-get update && sudo apt-get install -y jq
+      - run: scripts/e2e-docker.sh

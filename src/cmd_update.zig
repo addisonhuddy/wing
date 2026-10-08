@@ -16,6 +16,7 @@ const update_script =
     \\set -eu
     \\repo=addisonhuddy/wing
     \\current=v$1 bin_dir=$2 want=$3
+    \\installer_url=${WING_INSTALLER_URL:-https://raw.githubusercontent.com/$repo/main/install.sh}
     \\if command -v curl >/dev/null 2>&1; then
     \\    fetch() { curl -fsSL "$1"; }
     \\    headers() { curl -fsSI "$1"; }
@@ -37,7 +38,7 @@ const update_script =
     \\    fi
     \\fi
     \\echo "wing: updating $current to $want" >&2
-    \\installer=$(fetch "https://raw.githubusercontent.com/$repo/main/install.sh") || {
+    \\installer=$(fetch "$installer_url") || {
     \\    echo "wing: could not download install.sh from github.com/$repo" >&2
     \\    exit 1
     \\}
