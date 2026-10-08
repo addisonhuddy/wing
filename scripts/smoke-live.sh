@@ -44,7 +44,7 @@ echo "push and kite produce/read round-trip"
 GUID=$(printf '%s\n' "$SCHEMA" | "$WING" push "$ORDERS")
 printf '%s\n' "$SCHEMA" | "$WING" push "$LEGACY" >/dev/null
 printf '%s\n' '{"topic":"'"$ORDERS"'","value":"{\"id\":1,\"name\":\"one\"}","headers":[]}' |
-    "$WING" write "$ORDERS" | "$KITE" produce --json "$ORDERS"
+    "$WING" write "$ORDERS:1" | "$KITE" produce --json "$ORDERS"
 "$KITE" consume --from-beginning --max 1 --idle 2s --json "$ORDERS" |
     "$WING" read | jq -e --arg topic "$ORDERS" '.value.id == 1 and .schema.value.topic == $topic and .schema.value.version == 1' >/dev/null
 "$KITE" consume --from-beginning --max 1 --idle 2s --json "$ORDERS" |
@@ -110,6 +110,7 @@ jq -r .guid <<<"$ENVELOPE" >"$TMP/original.guid"
 "$WING" get "$REF_ROOT" --meta | jq -r .guid >"$TMP/original.guid"
 "$WING" get "$REF_COPY" --meta | jq -r .guid >"$TMP/copied.guid"
 cmp "$TMP/original.guid" "$TMP/copied.guid"
+"$WING" get "$REF_ROOT:1" >/dev/null
 printf '%s\n' '{"code":"ok"}' | "$WING" _validate "$TMP/bundled.schema.json" |
     grep -qx valid
 set +e
@@ -194,6 +195,7 @@ set -e
 [ "$check_status" -eq 2 ]
 "$WING" get "$ORDERS" --meta | "$WING" push "$COPY" --meta |
     cmp -s <(printf '%s\n' "$GUID") -
+"$WING" rm "$COPY:1" -y >/dev/null
 
 echo "live smoke passed"
 echo "transcript: $TRANSCRIPT"

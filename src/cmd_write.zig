@@ -43,11 +43,12 @@ const Resolver = struct {
 
     fn resolve(self: *Resolver, reference: []const u8, key: bool, line: usize) !*Info {
         if (app.headerParseableGuid(reference)) return self.resolveGuid(reference, key, null, line);
-        const at = std.mem.lastIndexOfScalar(u8, reference, '@');
-        const topic = if (at) |index| reference[0..index] else reference;
-        const version_request = if (at) |index| reference[index + 1 ..] else "latest";
-        if (at != null and !app.validVersion(version_request, true))
-            fatal(self.global, "write", "version must be 'latest' or a positive integer");
+        const parsed = app.parseReference(reference, true) catch |err| switch (err) {
+            error.LegacyAtSyntax => fatal(self.global, "write", app.legacyReferenceMessage(self.alloc, reference)),
+            error.InvalidVersion => fatal(self.global, "write", "version must be 'latest' or a positive integer"),
+        };
+        const topic = parsed.subject;
+        const version_request = parsed.version orelse "latest";
         if (self.settings.urls.len == 0)
             fatalLine(self.global, line, "no Schema Registry configured; pass --registry URL, set SCHEMA_REGISTRY_URL, or run wing registry init");
         const subject = try app.subjectForTopic(self.alloc, topic, key);
@@ -256,6 +257,14 @@ pub fn run(init: std.process.Init, global: cli.Global, args: []const []const u8)
             reference = arg;
         } else {
             app.fatal("unexpected argument", global.errors_json, "write");
+        }
+    }
+    if (reference) |ref| {
+        if (!app.headerParseableGuid(ref)) {
+            _ = app.parseReference(ref, true) catch |err| switch (err) {
+                error.LegacyAtSyntax => fatal(global, "write", app.legacyReferenceMessage(init.arena.allocator(), ref)),
+                error.InvalidVersion => fatal(global, "write", "version must be 'latest' or a positive integer"),
+            };
         }
     }
 

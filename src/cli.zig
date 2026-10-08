@@ -199,6 +199,7 @@ pub fn help(command: []const u8) []const u8 {
         \\Usage: wing get REF [--meta] [--key]
         \\
         \\Fetch a schema by topic, subject, version, or GUID.
+        \\Pin a version with SUBJECT:VERSION; use @NAME only for registry selection.
         \\
         \\Options:
         \\  --meta                Print the registry response envelope.
@@ -206,7 +207,7 @@ pub fn help(command: []const u8) []const u8 {
         \\
         \\Examples:
         \\  wing get orders
-        \\  wing get orders@2
+        \\  wing get orders:2
         \\  wing get orders --meta
         \\
     ;
@@ -215,6 +216,7 @@ pub fn help(command: []const u8) []const u8 {
         \\Usage: wing rm REF [-y] [--permanent] [--key]
         \\
         \\Delete a subject or one version. Deletion is soft by default.
+        \\Pin a version with SUBJECT:VERSION; use @NAME only for registry selection.
         \\
         \\Options:
         \\  -y                    Skip terminal confirmation.
@@ -223,7 +225,7 @@ pub fn help(command: []const u8) []const u8 {
         \\
         \\Examples:
         \\  wing rm orders
-        \\  wing rm orders@2 -y
+        \\  wing rm orders:2 -y
         \\  wing rm orders --permanent -y
         \\
     ;
@@ -260,6 +262,7 @@ pub fn help(command: []const u8) []const u8 {
         \\Usage: wing write [REF] [OPTIONS] [@NAME]
         \\
         \\Validate JSON records and prepare them for kite produce.
+        \\Pin a version with TOPIC:VERSION; use @NAME only for registry selection.
         \\
         \\Options:
         \\  --fit                 Fit records to the selected schema.
@@ -267,7 +270,7 @@ pub fn help(command: []const u8) []const u8 {
         \\
         \\Examples:
         \\  wing write orders --fit
-        \\  wing write orders@latest | kite produce --json orders
+        \\  wing write orders:latest | kite produce --json orders
         \\
     ;
     if (std.mem.eql(u8, command, "push"))
@@ -327,7 +330,7 @@ pub fn help(command: []const u8) []const u8 {
     \\  kite consume --json orders | wing read | jq '.id' |
     \\    wing write --fit | kite produce --json orders
     \\  wing ls orders
-    \\  wing get orders@latest
+    \\  wing get orders:latest
     \\  wing push orders < orders.schema.json
     \\
     \\Configuration:

@@ -17,7 +17,6 @@ const emitJson = app.emitJson;
 const jsonField = app.jsonField;
 const textField = app.textField;
 const subjectForTopic = app.subjectForTopic;
-const validVersion = app.validVersion;
 const optionError = app.optionError;
 const registryDescription = app.registryDescription;
 const noSchemaMessage = app.noSchemaMessage;
@@ -85,12 +84,13 @@ pub fn run(init: std.process.Init, global: cli.Global, args: []const []const u8)
         if (subject == null or version_text == null)
             fatal("GUID is not registered under a default-context topic subject", global.errors_json, "get");
     } else {
+        const parsed = app.parseReference(reference, true) catch |err| switch (err) {
+            error.LegacyAtSyntax => fatal(app.legacyReferenceMessage(alloc, reference), global.errors_json, "get"),
+            error.InvalidVersion => fatal("version must be 'latest' or a positive integer", global.errors_json, "get"),
+        };
         if (settings.urls.len == 0)
             fatal("no Schema Registry configured; pass --registry URL, set SCHEMA_REGISTRY_URL, or run wing registry init", global.errors_json, "get");
-        const at = std.mem.lastIndexOfScalar(u8, reference, '@');
-        const raw_subject = if (at) |idx| reference[0..idx] else reference;
-        if (at) |idx| if (!validVersion(reference[idx + 1 ..], true))
-            fatal("version must be 'latest' or a positive integer", global.errors_json, "get");
+        const raw_subject = parsed.subject;
         subject = try subjectForTopic(alloc, raw_subject, key);
         const versions = reg.versions(subject.?) catch |err| {
             if (reg.last_status == 404)
@@ -99,7 +99,7 @@ pub fn run(init: std.process.Init, global: cli.Global, args: []const []const u8)
         };
         if (versions != .array or versions.array.items.len == 0)
             fatal(noSchemaMessage(alloc, topicFromSubject(raw_subject), subject.?, global, settings), global.errors_json, "get");
-        const requested_version = if (at) |idx| reference[idx + 1 ..] else "latest";
+        const requested_version = parsed.version orelse "latest";
         if (!std.mem.eql(u8, requested_version, "latest") and !hasVersion(alloc, versions, requested_version))
             fatal(unknownVersionMessage(alloc, subject.?, requested_version, versions), global.errors_json, "get");
         version_text = if (std.mem.eql(u8, requested_version, "latest")) latestVersion(alloc, versions) else requested_version;

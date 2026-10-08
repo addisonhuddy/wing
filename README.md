@@ -131,8 +131,9 @@ It installs to `/usr/local/bin` by default. Set `WING_BIN_DIR` and
 | `wing registry init` | Interactively configure and test a registry. |
 | `wing update [VERSION]` | Replace this binary with the latest or named release. |
 
-`REF` may be a topic, a topic followed by `@VERSION` (for example
-`orders@3`), a subject, or a schema GUID. `--key` selects the topic key schema
+`REF` may be a topic, a topic followed by `:VERSION` (for example
+`orders:3`), a subject, or a schema GUID. `@NAME` selects a named registry;
+`--key` selects the topic key schema
 for `ls`, `get`, `push`, and `rm`.
 
 ### Common command examples
@@ -153,7 +154,7 @@ Copy metadata to a second topic, then remove that temporary subject:
 ```sh
 COPY="${TOPIC}-copy"
 wing get "$TOPIC" --meta | wing push "$COPY" --meta
-wing rm "$COPY" -y
+wing rm "$COPY:1" -y
 ```
 
 For a record-only pipeline, consume a bounded number of records and preserve

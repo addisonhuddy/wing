@@ -23,6 +23,8 @@ with kite, a Kafka CLI, using one JSON record per line.
   `2` invalid records/schema or failed checks; `130` SIGINT/SIGTERM.
 - Configure via `--registry`, `SCHEMA_REGISTRY_URL`, or `wing.yaml`.
   `@NAME` selects a named registry for one invocation.
+- A version-pinned REF uses `TOPIC:VERSION` (for example `orders:3`);
+  `@NAME` is reserved for named registry selection.
 - Registry responses time out after 10 seconds by default; configure
   `schema.registry.request.timeout.ms` or
   `SCHEMA_REGISTRY_REQUEST_TIMEOUT_MS` to change the timeout in milliseconds.

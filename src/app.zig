@@ -94,6 +94,40 @@ pub fn validVersion(text: []const u8, allow_latest: bool) bool {
     return number > 0;
 }
 
+pub const Reference = struct {
+    subject: []const u8,
+    version: ?[]const u8,
+};
+
+pub const ReferenceError = error{
+    LegacyAtSyntax,
+    InvalidVersion,
+};
+
+pub fn parseReference(reference: []const u8, allow_latest: bool) ReferenceError!Reference {
+    if (std.mem.indexOfScalar(u8, reference, '@') != null)
+        return error.LegacyAtSyntax;
+    const separator = std.mem.lastIndexOfScalar(u8, reference, ':') orelse
+        return .{ .subject = reference, .version = null };
+    const suffix = reference[separator + 1 ..];
+    if (validVersion(suffix, allow_latest))
+        return .{ .subject = reference[0..separator], .version = suffix };
+    if (std.mem.startsWith(u8, reference, ":."))
+        return .{ .subject = reference, .version = null };
+    return error.InvalidVersion;
+}
+
+pub fn legacyReferenceMessage(alloc: std.mem.Allocator, reference: []const u8) []const u8 {
+    var corrected: std.ArrayListUnmanaged(u8) = .empty;
+    defer corrected.deinit(alloc);
+    for (reference) |character|
+        corrected.append(alloc, if (character == '@') ':' else character) catch return "out of memory";
+    return std.fmt.allocPrint(alloc, "'{s}': use '{s}' to pin a version ('@NAME' selects a registry)", .{
+        reference,
+        corrected.items,
+    }) catch "out of memory";
+}
+
 pub fn optionError(arg: []const u8, suggestions: []const []const u8) ?[]const u8 {
     if (!std.mem.startsWith(u8, arg, "-")) return null;
     for (suggestions) |valid| {
@@ -297,6 +331,35 @@ test "registry diagnostics include selection origin" {
         "no schema for topic 'orders' (subject orders-value not found in registry 'prod' (from @prod))",
         message,
     );
+}
+
+test "parse reference syntax" {
+    const Case = struct {
+        reference: []const u8,
+        allow_latest: bool,
+        subject: []const u8,
+        version: ?[]const u8,
+    };
+    const cases = [_]Case{
+        .{ "orders", true, "orders", null },
+        .{ "orders:3", true, "orders", "3" },
+        .{ "orders:latest", true, "orders", "latest" },
+        .{ "orders-value:7", true, "orders-value", "7" },
+        .{ ":.ctx:orders-value", true, ":.ctx:orders-value", null },
+        .{ ":.ctx:orders-value:3", true, ":.ctx:orders-value", "3" },
+    };
+    inline for (cases) |case| {
+        const parsed = try parseReference(case[0], case[1]);
+        try std.testing.expectEqualStrings(case[2], parsed.subject);
+        if (case[3]) |version| {
+            try std.testing.expectEqualStrings(version, parsed.version.?);
+        } else {
+            try std.testing.expect(parsed.version == null);
+        }
+    }
+    try std.testing.expectError(error.InvalidVersion, parseReference("orders:abc", true));
+    try std.testing.expectError(error.InvalidVersion, parseReference("orders:0", true));
+    try std.testing.expectError(error.InvalidVersion, parseReference("orders:latest", false));
 }
 
 pub fn registryFor(init: std.process.Init, settings: config.Settings) registry_mod.Registry {

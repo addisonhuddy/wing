@@ -80,10 +80,16 @@ if command -v bash >/dev/null; then
         case_at get-flags wing get --m
         case_at push-flags wing push --
         case_at push-argument wing push orders ""
+        case_at colon-word wing get orders:3
         case_at rm-flags wing rm --p
         case_at registry-actions wing registry ""
         case_at registry-set wing registry set pr
         case_at at-target wing @local
+        printf "__CASE_colon-trim__\n"
+        COMPREPLY=("orders:3" "orders:4")
+        _wing_ltrim_colon_completions "orders:3"
+        printf "%s\n" "${COMPREPLY[@]}"
+        printf "__END_CASE__\n"
     ') || fail "bash: completion script did not load"
     expect bash "$out" read write ls get push rm registry update --check --fit --key --meta --compat --permanent set @local-a
     case_output() {
@@ -94,6 +100,8 @@ if command -v bash >/dev/null; then
     expect_absent "bash root non-dash" "$(case_output root-empty)" --registry --config --help
     expect "bash root dash options" "$(case_output root-flags)" --registry --config --version
     expect_absent "bash positional argument" "$(case_output push-argument)" --fit --check --registry
+    expect_exact "bash colon argument" "$(case_output colon-word)" ""
+    expect_exact "bash colon completion trimming" "$(case_output colon-trim)" $'3\n4'
     expect_absent "bash registry action position" "$(case_output registry-actions)" --json --registry
     expect "bash dash-prefixed options" "$(case_output push-flags)" --check --meta --compat --registry
 else
