@@ -1,0 +1,29 @@
+# wing
+
+wing is a Zig CLI for Confluent Schema Registry and JSON Schema. It composes
+with kite, a Kafka CLI, using one JSON record per line.
+
+## Stable contract
+
+- `wing read` resolves Confluent schema IDs, validates consumed kite JSON
+  records, and emits records with schema ID headers/prefixes removed.
+- `wing write [REF] [--fit]` validates records, applies schema-directed
+  fitting when requested, and adds the selected GUID schema header.
+- `wing push [TOPIC]` lints and registers a JSON Schema. `--check` lints
+  without registering; `--meta` reads/writes registry metadata envelopes.
+- `wing get REF` prints schema text; `--meta` prints
+  `{topic,version,id,guid,compat,schema,references,metadata,ruleSet}`.
+- `wing ls [TOPIC]`, `wing rm REF -y`, `wing registry list|set|init`, and
+  `wing update [VERSION]` manage registry schemas and configuration.
+- Record input is kite `--json`: one JSON object per line with `value`
+  required. Strings represent bytes; object/array values use their source JSON.
+- stdout is data and stderr is diagnostics. Validation pointers are plain JSON
+  Pointers, with the root represented by the empty string.
+- Exit codes: `0` success; `1` usage/configuration/registry/tool failure;
+  `2` invalid records/schema or failed checks; `130` SIGINT/SIGTERM.
+- Configure via `--registry`, `SCHEMA_REGISTRY_URL`, or `wing.yaml`.
+  `@NAME` selects a named registry for one invocation.
+- `--errors=json` writes structured diagnostic lines to stderr; `-q` suppresses
+  summaries; `-v` adds provenance and fitting changes.
+
+See README.md for commands, options, configuration precedence, and pipelines.
