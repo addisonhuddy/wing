@@ -197,5 +197,44 @@ set -e
     cmp -s <(printf '%s\n' "$GUID") -
 "$WING" rm "$COPY:1" -y >/dev/null
 
+assert_deleted_subject_absent() {
+    local subject=$1
+    curl -fsS "$SR/subjects?deleted=true" >"$TMP/deleted-subjects.json"
+    jq -e --arg subject "$subject" 'type == "array" and index($subject) == null' \
+        "$TMP/deleted-subjects.json" >/dev/null || {
+        echo "FAIL subject remains after permanent delete: $subject"
+        return 1
+    }
+}
+
+echo "permanent deletion of live and soft-deleted subjects and versions"
+RM_SOFT_TOPIC="$PREFIX-rm-soft"
+printf '%s\n' "$SCHEMA" | "$WING" push "$RM_SOFT_TOPIC" >/dev/null
+"$WING" rm "$RM_SOFT_TOPIC" -y >/dev/null
+"$WING" rm "$RM_SOFT_TOPIC" -y --permanent >/dev/null
+assert_deleted_subject_absent "${RM_SOFT_TOPIC}-value"
+
+RM_VERSION_TOPIC="$PREFIX-rm-version"
+printf '%s\n' "$SCHEMA" | "$WING" push "$RM_VERSION_TOPIC" >/dev/null
+"$WING" rm "$RM_VERSION_TOPIC:1" -y >/dev/null
+"$WING" rm "$RM_VERSION_TOPIC:1" -y --permanent >/dev/null
+assert_deleted_subject_absent "${RM_VERSION_TOPIC}-value"
+versions_status=$(curl -sS -o "$TMP/deleted-versions.json" -w '%{http_code}' \
+    "$SR/subjects/${RM_VERSION_TOPIC}-value/versions?deleted=true")
+if [ "$versions_status" = 200 ]; then
+    jq -e 'type == "array" and all(.[]; tostring != "1")' "$TMP/deleted-versions.json" >/dev/null || {
+        echo "FAIL version remains after permanent delete: ${RM_VERSION_TOPIC}-value:1"
+        exit 1
+    }
+elif [ "$versions_status" != 404 ]; then
+    echo "FAIL unexpected status checking permanent version delete: $versions_status"
+    exit 1
+fi
+
+RM_LIVE_TOPIC="$PREFIX-rm-live"
+printf '%s\n' "$SCHEMA" | "$WING" push "$RM_LIVE_TOPIC" >/dev/null
+"$WING" rm "$RM_LIVE_TOPIC" -y --permanent >/dev/null
+assert_deleted_subject_absent "${RM_LIVE_TOPIC}-value"
+
 echo "live smoke passed"
 echo "transcript: $TRANSCRIPT"

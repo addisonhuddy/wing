@@ -155,13 +155,31 @@ pub const Registry = struct {
     }
 
     pub fn versions(self: *Registry, subject: []const u8) !std.json.Value {
-        const path = try std.fmt.allocPrint(self.alloc, "/subjects/{s}/versions", .{try pathEscape(self.alloc, subject)});
+        return self.subjectVersions(subject, false);
+    }
+
+    pub fn versionsIncludingDeleted(self: *Registry, subject: []const u8) !std.json.Value {
+        return self.subjectVersions(subject, true);
+    }
+
+    fn subjectVersions(self: *Registry, subject: []const u8, include_deleted: bool) !std.json.Value {
+        const query = if (include_deleted) "?deleted=true" else "";
+        const path = try std.fmt.allocPrint(self.alloc, "/subjects/{s}/versions{s}", .{ try pathEscape(self.alloc, subject), query });
         const body = try self.get(path);
         return std.json.parseFromSliceLeaky(std.json.Value, self.alloc, body, .{ .allocate = .alloc_always, .parse_numbers = false });
     }
 
     pub fn schema(self: *Registry, subject: []const u8, version: []const u8) !std.json.Value {
-        const path = try std.fmt.allocPrint(self.alloc, "/subjects/{s}/versions/{s}", .{ try pathEscape(self.alloc, subject), version });
+        return self.subjectSchema(subject, version, false);
+    }
+
+    pub fn schemaIncludingDeleted(self: *Registry, subject: []const u8, version: []const u8) !std.json.Value {
+        return self.subjectSchema(subject, version, true);
+    }
+
+    fn subjectSchema(self: *Registry, subject: []const u8, version: []const u8, include_deleted: bool) !std.json.Value {
+        const query = if (include_deleted) "?deleted=true" else "";
+        const path = try std.fmt.allocPrint(self.alloc, "/subjects/{s}/versions/{s}{s}", .{ try pathEscape(self.alloc, subject), version, query });
         const body = try self.get(path);
         return std.json.parseFromSliceLeaky(std.json.Value, self.alloc, body, .{ .allocate = .alloc_always, .parse_numbers = false });
     }
